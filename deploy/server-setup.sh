@@ -65,7 +65,14 @@ DATABASE_URL="postgresql://$PGUSER:$PGPASS@127.0.0.1:5432/$PGDB?schema=public"
 # ---- 4. clone / update repos ----------------------------------------------
 say "Fetching source"
 mkdir -p "$WWW"
-clone_or_pull(){ [ -d "$2/.git" ] && git -C "$2" pull --ff-only || git clone --depth 1 "$1" "$2"; }
+# Robust for shallow clones: fetch + hard-reset to origin/main (untracked .env/.seeded survive).
+clone_or_pull(){
+  if [ -d "$2/.git" ]; then
+    git -C "$2" fetch --depth 1 origin main && git -C "$2" reset --hard origin/main
+  else
+    git clone --depth 1 "$1" "$2"
+  fi
+}
 clone_or_pull "$REPO_API"  "$API_DIR"
 clone_or_pull "$REPO_ERP"  "$ERP_DIR"
 clone_or_pull "$REPO_DOCS" "$DOCS_DIR"

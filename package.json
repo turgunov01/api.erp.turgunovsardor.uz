@@ -20,7 +20,6 @@
     "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
-    "@embedded-postgres/windows-x64": "^18.4.0-beta.17",
     "@fastify/cookie": "^11.0.2",
     "@fastify/cors": "^10.0.2",
     "@fastify/helmet": "^13.1.0",
@@ -34,6 +33,11 @@
     "fastify": "^5.2.1",
     "fastify-plugin": "^5.1.0",
     "zod": "^3.24.1"
+  },
+  "optionalDependencies": {
+    "@embedded-postgres/windows-x64": "^18.4.0-beta.17",
+    "@embedded-postgres/linux-x64": "^18.4.0-beta.17",
+    "@embedded-postgres/darwin-arm64": "^18.4.0-beta.17"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
