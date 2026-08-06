@@ -171,16 +171,17 @@ server {
 EOF
 ln -sf /etc/nginx/sites-available/ttr-bootstrap.conf /etc/nginx/sites-enabled/ttr-bootstrap.conf
 rm -f /etc/nginx/sites-enabled/default
+# Drop any stale TTR site symlinks from a previous (failed) run so this test can't trip on them.
+rm -f "/etc/nginx/sites-enabled/$ERP_HOST.conf" "/etc/nginx/sites-enabled/$API_HOST.conf" "/etc/nginx/sites-enabled/$DOCS_HOST.conf"
 nginx -t && systemctl reload nginx
 
 # ---- 8. certificates -------------------------------------------------------
 say "Obtaining Let's Encrypt certificates"
+# ONE multi-SAN certificate for all three hosts, stored under a fixed lineage name
+# ($ERP_HOST) — every site config points at /etc/letsencrypt/live/$ERP_HOST/.
 certbot certonly --webroot -w /var/www/certbot --non-interactive --agree-tos \
-    -m "$LE_EMAIL" -d "$ERP_HOST" -d "$API_HOST" -d "$DOCS_HOST" || {
-      # fall back to per-host if a combined issuance fails
-      for H in "$ERP_HOST" "$API_HOST" "$DOCS_HOST"; do
-        certbot certonly --webroot -w /var/www/certbot --non-interactive --agree-tos -m "$LE_EMAIL" -d "$H" || true
-      done; }
+    -m "$LE_EMAIL" --cert-name "$ERP_HOST" --keep-until-expiring \
+    -d "$ERP_HOST" -d "$API_HOST" -d "$DOCS_HOST"
 
 # Phase B — swap in the real TLS site configs.
 say "Enabling TLS sites"
