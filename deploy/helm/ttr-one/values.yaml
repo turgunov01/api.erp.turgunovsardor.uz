@@ -1,0 +1,80 @@
+# ---------------------------------------------------------------------------
+# TTR ONE Helm values. Assumes an EXTERNAL Postgres (set via secret.databaseUrl).
+# ---------------------------------------------------------------------------
+
+nameOverride: ""
+fullnameOverride: ""
+
+api:
+  image:
+    repository: ghcr.io/ttr-one/api
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  service:
+    port: 3000
+  # Run `prisma migrate deploy` as an init container before serving.
+  migrations:
+    enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+web:
+  image:
+    repository: ghcr.io/ttr-one/web
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  service:
+    port: 80
+    targetPort: 8080
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# Non-secret config (rendered into a ConfigMap, injected via envFrom).
+config:
+  NODE_ENV: production
+  PORT: "3000"
+  HOST: 0.0.0.0
+  CORS_ORIGINS: https://app.ttr-one.example.com
+  APP_URL: https://app.ttr-one.example.com
+  AI_MODEL: ""
+
+# Secrets. For real deployments prefer an existing secret (existingSecret) or an
+# external secrets operator over inline values.
+secret:
+  # If set, use this pre-created Secret instead of rendering one from values.
+  existingSecret: ""
+  databaseUrl: "postgresql://ttr:change-me@postgres:5432/ttr_one?schema=public"
+  jwtSecret: "change-me-min-16-chars-use-openssl-rand-hex-32"
+  secretKey: "change-me-another-openssl-rand-hex-32"
+  anthropicApiKey: ""
+  openaiApiKey: ""
+  smtpUrl: ""
+  telegramBotToken: ""
+
+ingress:
+  enabled: true
+  className: nginx
+  host: app.ttr-one.example.com
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  tls:
+    enabled: true
+    secretName: ttr-one-tls

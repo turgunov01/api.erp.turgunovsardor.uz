@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ttr-one-config
+  namespace: ttr-one
+  labels:
+    app.kubernetes.io/part-of: ttr-one
+data:
+  NODE_ENV: "production"
+  PORT: "3000"
+  HOST: "0.0.0.0"
+  # Public origins allowed to call the API (comma-separated).
+  CORS_ORIGINS: "https://app.ttr-one.example.com"
+  APP_URL: "https://app.ttr-one.example.com"
+  # Non-secret AI config (keys go in the Secret).
+  AI_MODEL: ""

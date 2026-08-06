@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TTR ONE — Панель</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- LOGIN -->
+  <div id="login" class="login-wrap hidden">
+    <form class="login-card" id="loginForm">
+      <div class="brand-row"><div class="logo">T</div><div class="brand-name">TTR&nbsp;ONE</div></div>
+      <div class="login-sub">Вход в панель управления</div>
+      <label>Email</label>
+      <input id="email" type="email" placeholder="you@company.com" autocomplete="username" />
+      <label>Пароль</label>
+      <input id="password" type="password" autocomplete="current-password" />
+      <button class="btn block" type="submit">Войти</button>
+      <div class="error" id="loginError"></div>
+      <div style="text-align:center;margin-top:14px"><a href="#" id="forgotLink" class="link">Забыли пароль?</a></div>
+      <div class="hint">Нет аккаунта? <a href="#register" class="link" id="toRegister">Зарегистрировать компанию</a><br>
+        Демо: admin@demo-factory.com / Admin123!</div>
+    </form>
+  </div>
+
+  <!-- REGISTER -->
+  <div id="register" class="login-wrap hidden">
+    <form class="login-card" id="registerForm" style="max-width:460px">
+      <div class="brand-row"><div class="logo">T</div><div class="brand-name">TTR&nbsp;ONE</div></div>
+      <div class="login-sub">Регистрация компании — 14 дней бесплатно</div>
+      <label>Название компании</label>
+      <input id="r_company" placeholder="ООО «Мой Завод»" />
+      <label>Сфера деятельности</label>
+      <select id="r_industry"></select>
+      <div class="row2">
+        <div><label>Ваше имя</label><input id="r_name" placeholder="Иван Иванов" /></div>
+        <div><label>Email</label><input id="r_email" type="email" placeholder="you@company.com" /></div>
+      </div>
+      <label>Пароль</label>
+      <input id="r_password" type="password" placeholder="минимум 8 символов" autocomplete="new-password" />
+      <button class="btn block" type="submit">Создать компанию</button>
+      <div class="error" id="registerError"></div>
+      <div class="hint">Уже есть аккаунт? <a href="#login" class="link" id="toLogin">Войти</a></div>
+    </form>
+  </div>
+
+  <!-- ACCEPT INVITE -->
+  <div id="accept-invite" class="login-wrap hidden">
+    <form class="login-card" id="acceptForm">
+      <div class="brand-row"><div class="logo">T</div><div class="brand-name">TTR&nbsp;ONE</div></div>
+      <div class="login-sub" id="inviteSub">Приглашение в компанию</div>
+      <label>Ваше имя</label>
+      <input id="a_name" placeholder="Иван Иванов" />
+      <label>Пароль</label>
+      <input id="a_password" type="password" placeholder="минимум 8 символов" autocomplete="new-password" />
+      <button class="btn block" type="submit">Принять приглашение</button>
+      <div class="error" id="acceptError"></div>
+      <div class="hint"><a href="#login" class="link">Войти в другой аккаунт</a></div>
+    </form>
+  </div>
+
+  <!-- APP -->
+  <div id="app" class="shell hidden">
+    <aside class="sidebar">
+      <div class="brand-row"><div class="logo" id="sideLogo">T</div><div class="brand-name" id="sideBrand">TTR ONE</div></div>
+      <nav class="nav" id="nav"></nav>
+    </aside>
+    <div class="main">
+      <div id="banner"></div>
+      <div class="topbar">
+        <h1 id="pageTitle">Dashboard</h1>
+        <div class="userbox">
+          <span id="tenantName"></span>
+          <div class="avatar" id="avatar">A</div>
+          <span id="userName"></span>
+          <button class="btn ghost sm" id="securityBtn">Безопасность</button>
+          <button class="btn ghost sm" id="changePwBtn">Сменить пароль</button>
+          <button class="btn ghost sm" id="logoutBtn">Выйти</button>
+        </div>
+      </div>
+      <div class="content" id="content"></div>
+    </div>
+  </div>
+
+  <!-- PIN LOCK OVERLAY -->
+  <div id="lock" class="lock-wrap hidden"></div>
+
+  <div id="modalRoot"></div>
+  <div id="toast" class="toast"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

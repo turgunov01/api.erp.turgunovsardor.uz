@@ -1,0 +1,19 @@
+node_modules/
+dev.db
+dev.db-journal
+*.log
+# Secrets & environment — never commit
+.env
+.env.*
+!.env.example
+# Frontend lives in its own repo (erp.turgunovsardor.uz)
+web/
+# Local data / runtime
+.pgdata/
+.storage/
+backups/
+dist/
+.output/
+.nuxt/
+prisma/migrations/dev/
+.DS_Store

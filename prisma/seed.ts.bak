@@ -1,0 +1,652 @@
+﻿// Seed a demo factory tenant so the platform is usable immediately.
+import 'dotenv/config';
+import { PrismaClient, Prisma } from '@prisma/client';
+import bcrypt from 'bcryptjs';
+import { PERMISSIONS, DEFAULT_ROLES } from '../src/lib/permissions.js';
+import { DEFAULT_CHART, postEntry, nextDocNumber } from '../src/lib/ledger.js';
+
+const prisma = new PrismaClient();
+const D = (v: number) => new Prisma.Decimal(v);
+
+async function main() {
+  const adminEmail = process.env.SEED_ADMIN_EMAIL || 'admin@demo-factory.com';
+  const adminPassword = process.env.SEED_ADMIN_PASSWORD || 'Admin123!';
+
+  // 1) Global permission catalog (idempotent)
+  for (const p of PERMISSIONS) {
+    await prisma.permission.upsert({
+      where: { code: p.code },
+      create: { code: p.code, module: p.module, description: p.description },
+      update: { module: p.module, description: p.description },
+    });
+  }
+  const permByCode = new Map((await prisma.permission.findMany()).map((p) => [p.code, p.id]));
+
+  // 2) Tenant вЂ” demo has an active Business subscription
+  const periodEnd = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
+  const tenant = await prisma.tenant.upsert({
+    where: { slug: 'demo-factory' },
+    create: { slug: 'demo-factory', name: 'Demo Factory LLC', industry: 'manufacturing', plan: 'enterprise', status: 'active', subscriptionStatus: 'active', currentPeriodEnd: periodEnd, vatEnabled: true, vatRatePct: 12 },
+    update: { industry: 'manufacturing', plan: 'enterprise', subscriptionStatus: 'active', currentPeriodEnd: periodEnd, vatEnabled: true, vatRatePct: 12 },
+  });
+
+  // 2b) Enabled modules for the demo tenant (per its niche)
+  const { ALL_MODULE_KEYS, AVAILABLE_MODULE_KEYS, nicheModules } = await import('../src/lib/modules.js');
+  const suggested = new Set(nicheModules('manufacturing'));
+  for (const key of ALL_MODULE_KEYS) {
+    // Demo showcases the document flow (Stage 9), POS (15), projects (16) and logistics
+    // (17) even though the manufacturing niche doesn't preset them.
+    const demoExtra = ['documents', 'pos', 'projects', 'logistics'];
+    const enabled = demoExtra.includes(key) ? true : suggested.has(key) && AVAILABLE_MODULE_KEYS.includes(key);
+    await prisma.tenantModule.upsert({
+      where: { tenantId_moduleKey: { tenantId: tenant.id, moduleKey: key } },
+      create: { tenantId: tenant.id, moduleKey: key, enabled },
+      update: { enabled },
+    });
+  }
+
+  // 3) Roles + role permissions
+  const roleByCode = new Map<string, string>();
+  for (const r of DEFAULT_ROLES) {
+    const role = await prisma.role.upsert({
+      where: { tenantId_code: { tenantId: tenant.id, code: r.code } },
+      create: { tenantId: tenant.id, code: r.code, name: r.name, description: r.description, isSystem: true },
+      update: { name: r.name, description: r.description },
+    });
+    roleByCode.set(r.code, role.id);
+    // reset & set permissions
+    await prisma.rolePermission.deleteMany({ where: { roleId: role.id } });
+    await prisma.rolePermission.createMany({
+      data: r.permissions.map((code) => ({ roleId: role.id, permissionId: permByCode.get(code)! })),
+    });
+  }
+
+  // 4) Admin user (owner)
+  const passwordHash = await bcrypt.hash(adminPassword, 10);
+  const admin = await prisma.user.upsert({
+    where: { tenantId_email: { tenantId: tenant.id, email: adminEmail } },
+    create: { tenantId: tenant.id, email: adminEmail, fullName: 'Factory Administrator', passwordHash, platformAdmin: true },
+    update: { passwordHash, platformAdmin: true },
+  });
+  await prisma.userRole.upsert({
+    where: { userId_roleId: { userId: admin.id, roleId: roleByCode.get('owner')! } },
+    create: { userId: admin.id, roleId: roleByCode.get('owner')! },
+    update: {},
+  });
+
+  // A shop-floor operator too
+  const opHash = await bcrypt.hash('Operator123!', 10);
+  const operator = await prisma.user.upsert({
+    where: { tenantId_email: { tenantId: tenant.id, email: 'operator@demo-factory.com' } },
+    create: { tenantId: tenant.id, email: 'operator@demo-factory.com', fullName: 'Shop-floor Operator', passwordHash: opHash },
+    update: {},
+  });
+  await prisma.userRole.upsert({
+    where: { userId_roleId: { userId: operator.id, roleId: roleByCode.get('operator')! } },
+    create: { userId: operator.id, roleId: roleByCode.get('operator')! },
+    update: {},
+  });
+
+  // 5) Company + warehouses
+  const company = await prisma.company.upsert({
+    where: { tenantId_code: { tenantId: tenant.id, code: 'MAIN' } },
+    create: { tenantId: tenant.id, code: 'MAIN', name: 'Demo Factory LLC', legalName: 'Demo Factory Limited', currency: 'UZS' },
+    update: {},
+  });
+  const whMain = await prisma.warehouse.upsert({
+    where: { tenantId_code: { tenantId: tenant.id, code: 'WH-MAIN' } },
+    create: { tenantId: tenant.id, companyId: company.id, code: 'WH-MAIN', name: 'Main Warehouse', address: 'Plant #1' },
+    update: {},
+  });
+  const whRaw = await prisma.warehouse.upsert({
+    where: { tenantId_code: { tenantId: tenant.id, code: 'WH-RAW' } },
+    create: { tenantId: tenant.id, companyId: company.id, code: 'WH-RAW', name: 'Raw Materials Store', address: 'Plant #1' },
+    update: {},
+  });
+
+  // 6) Units + categories
+  const unitByCode = new Map<string, string>();
+  for (const u of [
+    { code: 'pcs', name: 'Pieces', precision: 0 },
+    { code: 'kg', name: 'Kilogram', precision: 3 },
+    { code: 'm', name: 'Meter', precision: 2 },
+    { code: 'l', name: 'Liter', precision: 2 },
+  ]) {
+    const unit = await prisma.unit.upsert({
+      where: { tenantId_code: { tenantId: tenant.id, code: u.code } },
+      create: { tenantId: tenant.id, ...u },
+      update: {},
+    });
+    unitByCode.set(u.code, unit.id);
+  }
+  const catRaw = await prisma.category.upsert({
+    where: { tenantId_code: { tenantId: tenant.id, code: 'RAW' } },
+    create: { tenantId: tenant.id, code: 'RAW', name: 'Raw Materials' },
+    update: {},
+  });
+  const catFin = await prisma.category.upsert({
+    where: { tenantId_code: { tenantId: tenant.id, code: 'FIN' } },
+    create: { tenantId: tenant.id, code: 'FIN', name: 'Finished Goods' },
+    update: {},
+  });
+
+  // 7) Products
+  const products = [
+    { sku: 'STEEL-SHEET-2MM', name: 'Steel Sheet 2mm', unit: 'kg', cat: catRaw.id, price: 1800000 },
+    { sku: 'BOLT-M8', name: 'Bolt M8', unit: 'pcs', cat: catRaw.id, price: 120000 },
+    { sku: 'PAINT-WHITE', name: 'Industrial Paint White', unit: 'l', cat: catRaw.id, price: 950000 },
+    { sku: 'CABINET-A1', name: 'Metal Cabinet A1', unit: 'pcs', cat: catFin.id, price: 12500000 },
+    { sku: 'SHELF-STD', name: 'Standard Shelf', unit: 'pcs', cat: catFin.id, price: 4300000 },
+  ];
+  const productByS = new Map<string, string>();
+  for (const p of products) {
+    const prod = await prisma.product.upsert({
+      where: { tenantId_sku: { tenantId: tenant.id, sku: p.sku } },
+      create: { tenantId: tenant.id, sku: p.sku, name: p.name, unitId: unitByCode.get(p.unit)!, categoryId: p.cat, priceMinor: p.price, currency: 'UZS', type: 'stockable' },
+      update: {},
+    });
+    productByS.set(p.sku, prod.id);
+  }
+
+  // 8) Opening stock (only if no movements exist yet)
+  const opening: { sku: string; wh: string; qty: number }[] = [
+    { sku: 'STEEL-SHEET-2MM', wh: whRaw.id, qty: 1200 },
+    { sku: 'BOLT-M8', wh: whRaw.id, qty: 5000 },
+    { sku: 'PAINT-WHITE', wh: whRaw.id, qty: 300 },
+    { sku: 'CABINET-A1', wh: whMain.id, qty: 40 },
+    { sku: 'SHELF-STD', wh: whMain.id, qty: 150 },
+  ];
+  const existing = await prisma.stockMovement.count({ where: { tenantId: tenant.id } });
+  if (existing === 0) {
+    for (const o of opening) {
+      const productId = productByS.get(o.sku)!;
+      // Opening cost basis (demo): use the product list price as standard cost so
+      // costing/valuation (Stage 8.2) has a non-zero basis from day one.
+      const unitCost = BigInt(products.find((p) => p.sku === o.sku)!.price);
+      const value = BigInt(Math.round(Number(unitCost) * o.qty));
+      await prisma.$transaction([
+        prisma.stockItem.upsert({
+          where: { warehouseId_productId: { warehouseId: o.wh, productId } },
+          create: { tenantId: tenant.id, warehouseId: o.wh, productId, quantity: D(o.qty), avgCostMinor: unitCost },
+          update: { quantity: D(o.qty), avgCostMinor: unitCost },
+        }),
+        prisma.stockMovement.create({
+          data: { tenantId: tenant.id, warehouseId: o.wh, productId, type: 'IN', quantity: D(o.qty), balanceAfter: D(o.qty), reason: 'Opening balance', unitCostMinor: unitCost, costMinor: value, userId: admin.id },
+        }),
+        prisma.costLayer.create({
+          data: { tenantId: tenant.id, warehouseId: o.wh, productId, remainingQty: D(o.qty), unitCostMinor: unitCost, sourceType: 'Opening' },
+        }),
+      ]);
+    }
+  } else {
+    // Idempotent top-up: restore demo stock to opening levels each seed so the shared
+    // test tenant never depletes across repeated runs (ship/reserve/issue keep working).
+    for (const o of opening) {
+      const productId = productByS.get(o.sku)!;
+      const unitCost = BigInt(products.find((p) => p.sku === o.sku)!.price);
+
+      await prisma.stockItem.upsert({
+        where: {
+          warehouseId_productId: {
+            warehouseId: o.wh,
+            productId,
+          },
+        },
+        create: {
+          tenantId: tenant.id,
+          warehouseId: o.wh,
+          productId,
+          quantity: D(o.qty),
+          reserved: D(0),
+          avgCostMinor: unitCost,
+        },
+        update: {},
+      });
+
+      await prisma.stockItem.updateMany({
+        where: {
+          tenantId: tenant.id,
+          warehouseId: o.wh,
+          productId,
+          quantity: { lt: D(o.qty) },
+        },
+        data: {
+          quantity: D(o.qty),
+          reserved: D(0),
+        },
+      });
+    }
+  }
+
+  // 8b) Backfill a cost basis for any stock that predates Stage 8 (idempotent):
+  // set the weighted-average cost and ensure one FIFO layer per on-hand item.
+  const priceByProductId = new Map(products.map((p) => [productByS.get(p.sku)!, p.price]));
+  const bareItems = await prisma.stockItem.findMany({ where: { tenantId: tenant.id, quantity: { gt: 0 }, avgCostMinor: 0 } });
+  for (const si of bareItems) {
+    const price = priceByProductId.get(si.productId);
+    if (!price) continue;
+    await prisma.stockItem.update({ where: { id: si.id }, data: { avgCostMinor: BigInt(price) } });
+    const layer = await prisma.costLayer.findFirst({ where: { tenantId: tenant.id, warehouseId: si.warehouseId, productId: si.productId } });
+    if (!layer) await prisma.costLayer.create({ data: { tenantId: tenant.id, warehouseId: si.warehouseId, productId: si.productId, remainingQty: si.quantity, unitCostMinor: BigInt(price), sourceType: 'Opening' } });
+  }
+
+  // 9) Sales & CRM demo data (idempotent)
+  const customers = [
+    { code: 'CUST-001', name: 'Tashkent Retail Group', inn: '301234567', phone: '+998 71 200 10 10', creditLimitMinor: 500_000_000_00 },
+    { code: 'CUST-002', name: 'Samarkand Trade LLC', inn: '302345678', phone: '+998 66 233 20 20', creditLimitMinor: 200_000_000_00 },
+    { code: 'CUST-003', name: 'Bukhara Distributors', inn: '303456789', phone: '+998 65 244 30 30', creditLimitMinor: 0 },
+  ];
+  const customerByCode = new Map<string, string>();
+  for (const c of customers) {
+    const cust = await prisma.customer.upsert({
+      where: { tenantId_code: { tenantId: tenant.id, code: c.code } },
+      create: { tenantId: tenant.id, code: c.code, name: c.name, inn: c.inn, phone: c.phone, creditLimitMinor: c.creditLimitMinor, rating: 4 },
+      update: {},
+    });
+    customerByCode.set(c.code, cust.id);
+  }
+
+  // A default price list with finished-goods prices
+  const existingList = await prisma.priceList.findFirst({ where: { tenantId: tenant.id, isDefault: true } });
+  if (!existingList) {
+    const list = await prisma.priceList.create({ data: { tenantId: tenant.id, name: 'Р РѕР·РЅРёС‡РЅС‹Р№ РїСЂР°Р№СЃ', isDefault: true } });
+    for (const sku of ['CABINET-A1', 'SHELF-STD']) {
+      const pid = productByS.get(sku)!;
+      await prisma.priceListItem.create({ data: { priceListId: list.id, productId: pid, productSku: sku, priceMinor: sku === 'CABINET-A1' ? 13_500_000_00 : 4_600_000_00 } });
+    }
+  }
+
+  // A few CRM deals across the funnel
+  const dealCount = await prisma.deal.count({ where: { tenantId: tenant.id } });
+  if (dealCount === 0) {
+    await prisma.deal.createMany({
+      data: [
+        { tenantId: tenant.id, title: 'РџРѕСЃС‚Р°РІРєР° С€РєР°С„РѕРІ РІ СЃРµС‚СЊ РјР°РіР°Р·РёРЅРѕРІ', customerId: customerByCode.get('CUST-001'), stage: 'proposal', amountMinor: 135_000_000_00, probability: 60, ownerId: admin.id },
+        { tenantId: tenant.id, title: 'РћРїС‚РѕРІС‹Р№ Р·Р°РєР°Р· СЃС‚РµР»Р»Р°Р¶РµР№', customerId: customerByCode.get('CUST-002'), stage: 'qualified', amountMinor: 46_000_000_00, probability: 40, ownerId: admin.id },
+        { tenantId: tenant.id, title: 'РќРѕРІС‹Р№ РґРёСЃС‚СЂРёР±СЊСЋС‚РѕСЂ вЂ” Р‘СѓС…Р°СЂР°', customerId: customerByCode.get('CUST-003'), stage: 'lead', amountMinor: 20_000_000_00, probability: 20, ownerId: admin.id },
+      ],
+    });
+  }
+
+  // 10) Production demo: a BOM for the Metal Cabinet + one draft production order
+  const bomCount = await prisma.bom.count({ where: { tenantId: tenant.id } });
+  if (bomCount === 0) {
+    const cabinet = productByS.get('CABINET-A1')!;
+    const bom = await prisma.bom.create({
+      data: {
+        tenantId: tenant.id, productId: cabinet, productName: 'Metal Cabinet A1', productSku: 'CABINET-A1',
+        name: 'РЁРєР°С„ A1 вЂ” СЂРµС†РµРїС‚СѓСЂР° v1', outputQty: D(1),
+        items: {
+          create: [
+            { productId: productByS.get('STEEL-SHEET-2MM')!, productName: 'Steel Sheet 2mm', productSku: 'STEEL-SHEET-2MM', quantity: D(8) },
+            { productId: productByS.get('BOLT-M8')!, productName: 'Bolt M8', productSku: 'BOLT-M8', quantity: D(24) },
+            { productId: productByS.get('PAINT-WHITE')!, productName: 'Industrial Paint White', productSku: 'PAINT-WHITE', quantity: D(2) },
+          ],
+        },
+      },
+      include: { items: true },
+    });
+    // A draft order for 5 cabinets, materials & finished goods at the raw store (where materials live).
+    const qty = 5;
+    await prisma.productionOrder.create({
+      data: {
+        tenantId: tenant.id, number: `PRD-${new Date().getFullYear()}-0001`, bomId: bom.id,
+        productId: cabinet, productName: 'Metal Cabinet A1', productSku: 'CABINET-A1',
+        quantity: D(qty), warehouseId: whRaw.id, status: 'draft', createdBy: admin.id,
+        items: { create: bom.items.map((it) => ({ productId: it.productId, productName: it.productName, productSku: it.productSku, requiredQty: D(Number(it.quantity) * qty) })) },
+      },
+    });
+  }
+
+  // 11) Advanced warehouse demo (Stage 7): bins, a batch with expiry, a serial, min levels
+  // Reset per-bin stock so repeated seed/test runs stay idempotent (the bin-placement
+  // test creates bins and places stock each run; without this it accumulates until a
+  // placement would exceed on-hand and trips EXCEEDS_ONHAND).
+  await prisma.binStock.deleteMany({ where: { tenantId: tenant.id } });
+  const locCount = await prisma.warehouseLocation.count({ where: { tenantId: tenant.id } });
+  if (locCount === 0) {
+    await prisma.warehouseLocation.createMany({
+      data: [
+        { tenantId: tenant.id, warehouseId: whMain.id, code: 'A-01-01', name: 'Р СЏРґ A, СЃС‚РµР»Р»Р°Р¶ 1, РїРѕР»РєР° 1', kind: 'bin' },
+        { tenantId: tenant.id, warehouseId: whMain.id, code: 'A-01-02', name: 'Р СЏРґ A, СЃС‚РµР»Р»Р°Р¶ 1, РїРѕР»РєР° 2', kind: 'bin' },
+        { tenantId: tenant.id, warehouseId: whRaw.id, code: 'R-Z1', name: 'Р—РѕРЅР° РїСЂРёС‘РјРєРё', kind: 'zone' },
+      ],
+    });
+  }
+  // Paint is batch-tracked with a shelf life; register one lot expiring soon.
+  await prisma.product.update({ where: { tenantId_sku: { tenantId: tenant.id, sku: 'PAINT-WHITE' } }, data: { tracking: 'batch' } });
+  const batchCount = await prisma.stockBatch.count({ where: { tenantId: tenant.id } });
+  if (batchCount === 0) {
+    await prisma.stockBatch.create({
+      data: { tenantId: tenant.id, warehouseId: whRaw.id, productId: productByS.get('PAINT-WHITE')!, productName: 'Industrial Paint White', productSku: 'PAINT-WHITE', batchNo: 'L-2026-06', expiryDate: new Date(Date.now() + 20 * 86400000), quantity: D(120), status: 'active' },
+    });
+  }
+  // Cabinet is serial-tracked; register a couple of units.
+  await prisma.product.update({ where: { tenantId_sku: { tenantId: tenant.id, sku: 'CABINET-A1' } }, data: { tracking: 'serial' } });
+  const serialCount = await prisma.serialNumber.count({ where: { tenantId: tenant.id } });
+  if (serialCount === 0) {
+    await prisma.serialNumber.createMany({
+      data: [
+        { tenantId: tenant.id, productId: productByS.get('CABINET-A1')!, productName: 'Metal Cabinet A1', serial: 'CAB-000001', warehouseId: whMain.id, status: 'in_stock' },
+        { tenantId: tenant.id, productId: productByS.get('CABINET-A1')!, productName: 'Metal Cabinet A1', serial: 'CAB-000002', warehouseId: whMain.id, status: 'in_stock' },
+      ],
+    });
+  }
+  // Min-stock levels: steel is below its minimum (opening 1200 < min 1500) в†’ low-stock signal.
+  for (const [sku, wh, minQty, reorderQty] of [['STEEL-SHEET-2MM', whRaw.id, 1500, 2000], ['BOLT-M8', whRaw.id, 1000, 3000]] as const) {
+    await prisma.stockItem.update({ where: { warehouseId_productId: { warehouseId: wh, productId: productByS.get(sku)! } }, data: { minQty: D(minQty), reorderQty: D(reorderQty) } });
+  }
+
+  // 12) Finance (Stage 8): chart of accounts + a cash box and a bank account.
+  for (const a of DEFAULT_CHART) {
+    await prisma.ledgerAccount.upsert({
+      where: { tenantId_code: { tenantId: tenant.id, code: a.code } },
+      create: { tenantId: tenant.id, code: a.code, name: a.name, type: a.type, isSystem: true },
+      update: {},
+    });
+  }
+  const finCount = await prisma.finAccount.count({ where: { tenantId: tenant.id } });
+  if (finCount === 0) {
+    const seedAccounts = [
+      { name: 'РћСЃРЅРѕРІРЅР°СЏ РєР°СЃСЃР°', kind: 'cash', ledger: '1010', opening: 5_000_000_00, accountNo: null as string | null },
+      { name: 'Р Р°СЃС‡С‘С‚РЅС‹Р№ СЃС‡С‘С‚ (UZS)', kind: 'bank', ledger: '1020', opening: 150_000_000_00, accountNo: '20208000900112345678' },
+    ];
+    for (const sa of seedAccounts) {
+      const opening = BigInt(sa.opening);
+      await prisma.$transaction(async (tx) => {
+        const acc = await tx.finAccount.create({
+          data: { tenantId: tenant.id, name: sa.name, kind: sa.kind, currency: 'UZS', accountNo: sa.accountNo, ledgerCode: sa.ledger, openingMinor: opening, balanceMinor: opening },
+        });
+        const posted = await postEntry(tx, {
+          tenantId: tenant.id, date: new Date(), memo: `РќР°С‡Р°Р»СЊРЅС‹Р№ РѕСЃС‚Р°С‚РѕРє: ${sa.name}`, source: 'cash', refType: 'FinAccount', refId: acc.id, userId: admin.id,
+          lines: [{ accountCode: sa.ledger, debitMinor: opening, description: 'РќР°С‡Р°Р»СЊРЅС‹Р№ РѕСЃС‚Р°С‚РѕРє' }, { accountCode: '3010', creditMinor: opening, description: 'РљР°РїРёС‚Р°Р»' }],
+        });
+        const number = await nextDocNumber(tx, tenant.id, 'cash_tx', 'CT');
+        await tx.cashTransaction.create({
+          data: { tenantId: tenant.id, accountId: acc.id, number, direction: 'in', category: 'opening', amountMinor: opening, currency: 'UZS', journalEntryId: posted.id, balanceAfter: opening, note: 'РќР°С‡Р°Р»СЊРЅС‹Р№ РѕСЃС‚Р°С‚РѕРє', createdBy: admin.id },
+        });
+      });
+    }
+  } else {
+    // Idempotent reset: restore each demo account's running balance to its opening amount
+    // so repeated suite runs (payroll payments, POS card sales) never deplete the accounts
+    // and cause spurious INSUFFICIENT_FUNDS. The immutable ledger is unaffected.
+    const accs = await prisma.finAccount.findMany({ where: { tenantId: tenant.id } });
+    for (const a of accs) await prisma.finAccount.update({ where: { id: a.id }, data: { balanceMinor: a.openingMinor } });
+  }
+
+  // 12c) Budgets (8.6) for the current month + a few scheduled payments (treasury).
+  const now = new Date();
+  const pcode = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+  const budgetSeed: [string, number][] = [
+    ['6010', 200_000_000_00], // planned revenue
+    ['7010', 120_000_000_00], // planned COGS
+    ['7020', 30_000_000_00],  // planned salary
+    ['7030', 8_000_000_00],   // planned rent
+  ];
+  for (const [code, planned] of budgetSeed) {
+    await prisma.budget.upsert({
+      where: { tenantId_periodCode_accountCode: { tenantId: tenant.id, periodCode: pcode, accountCode: code } },
+      create: { tenantId: tenant.id, periodCode: pcode, accountCode: code, plannedMinor: BigInt(planned), createdBy: admin.id },
+      update: {},
+    });
+  }
+  const schedCount = await prisma.paymentSchedule.count({ where: { tenantId: tenant.id } });
+  if (schedCount === 0) {
+    const day = (n: number) => new Date(now.getTime() + n * 86400000);
+    await prisma.paymentSchedule.createMany({
+      data: [
+        { tenantId: tenant.id, direction: 'out', title: 'РђСЂРµРЅРґР° С†РµС…Р°', counterparty: 'РђСЂРµРЅРґРѕРґР°С‚РµР»СЊ', category: 'rent', amountMinor: BigInt(8_000_000_00), dueDate: day(3), createdBy: admin.id },
+        { tenantId: tenant.id, direction: 'out', title: 'Р—Р°СЂРїР»Р°С‚Р° Р·Р° РјРµСЃСЏС†', category: 'salary', amountMinor: BigInt(30_000_000_00), dueDate: day(7), createdBy: admin.id },
+        { tenantId: tenant.id, direction: 'in', title: 'РћРїР»Р°С‚Р° РѕС‚ РїРѕРєСѓРїР°С‚РµР»СЏ', counterparty: 'РћРћРћ В«РљР»РёРµРЅС‚В»', category: 'sale', amountMinor: BigInt(45_000_000_00), dueDate: day(5), createdBy: admin.id },
+        { tenantId: tenant.id, direction: 'out', title: 'РќР”РЎ Р·Р° РїРµСЂРёРѕРґ', category: 'vat', amountMinor: BigInt(6_000_000_00), dueDate: day(12), createdBy: admin.id },
+      ],
+    });
+  }
+
+  // 13) Platform services (Stage 9): a document template + sample document + welcome notification.
+  const tpl = await prisma.docTemplate.upsert({
+    where: { tenantId_code: { tenantId: tenant.id, code: 'SUPPLY-CONTRACT' } },
+    create: {
+      tenantId: tenant.id, code: 'SUPPLY-CONTRACT', name: 'Р”РѕРіРѕРІРѕСЂ РїРѕСЃС‚Р°РІРєРё', kind: 'contract', isSystem: true,
+      body: 'Р”РћР“РћР’РћР  РџРћРЎРўРђР’РљР в„–{{number}}\nРі. {{city}}, {{date}}\n\nРџРѕСЃС‚Р°РІС‰РёРє: {{supplier}}\nРџРѕРєСѓРїР°С‚РµР»СЊ: {{buyer}}\nРџСЂРµРґРјРµС‚: РїРѕСЃС‚Р°РІРєР° С‚РѕРІР°СЂР° РЅР° СЃСѓРјРјСѓ {{amount}} СЃСѓРј.\n\nРџРѕРґРїРёСЃРё СЃС‚РѕСЂРѕРЅ.',
+    },
+    update: {},
+  });
+  const docCount = await prisma.document.count({ where: { tenantId: tenant.id } });
+  if (docCount === 0) {
+    const body = 'Р”РћР“РћР’РћР  РџРћРЎРўРђР’РљР в„–DOC-DEMO\nРі. РўР°С€РєРµРЅС‚\n\nРџРѕСЃС‚Р°РІС‰РёРє: РћРћРћ В«РЎС‚Р°Р»СЊВ»\nРџРѕРєСѓРїР°С‚РµР»СЊ: Demo Factory LLC\nРџСЂРµРґРјРµС‚: РїРѕСЃС‚Р°РІРєР° СЃС‚Р°Р»Рё.';
+    const doc = await prisma.document.create({
+      data: { tenantId: tenant.id, number: 'DOC-2026-00001', title: 'Р”РѕРіРѕРІРѕСЂ РїРѕСЃС‚Р°РІРєРё СЃС‚Р°Р»Рё', kind: 'contract', status: 'draft', currentVersion: 1, templateId: tpl.id, createdBy: admin.id },
+    });
+    await prisma.documentVersion.create({ data: { documentId: doc.id, version: 1, body, createdBy: admin.id } });
+  }
+  const notifCount = await prisma.notification.count({ where: { tenantId: tenant.id } });
+  if (notifCount === 0) {
+    await prisma.notification.create({
+      data: { tenantId: tenant.id, userId: admin.id, type: 'success', title: 'Р”РѕР±СЂРѕ РїРѕР¶Р°Р»РѕРІР°С‚СЊ РІ TTR ONE', body: 'РџР»Р°С‚С„РѕСЂРјРµРЅРЅС‹Рµ СЃРµСЂРІРёСЃС‹ РІРєР»СЋС‡РµРЅС‹: СѓРІРµРґРѕРјР»РµРЅРёСЏ, С„Р°Р№Р»С‹, РґРѕРєСѓРјРµРЅС‚РѕРѕР±РѕСЂРѕС‚, РїРѕРёСЃРє.' },
+    });
+  }
+
+  // 13) HR / РљР°РґСЂС‹ demo data (Stage 14) вЂ” departments, positions, employees,
+  // a timesheet, a pending leave request and a draft payroll run (idempotent).
+  const departments = [
+    { code: 'prod', name: 'РџСЂРѕРёР·РІРѕРґСЃС‚РІРѕ' },
+    { code: 'admin', name: 'РђРґРјРёРЅРёСЃС‚СЂР°С†РёСЏ' },
+    { code: 'sales', name: 'РћС‚РґРµР» РїСЂРѕРґР°Р¶' },
+  ];
+  const deptByCode = new Map<string, string>();
+  for (const d of departments) {
+    const dep = await prisma.department.upsert({
+      where: { companyId_code: { companyId: company.id, code: d.code } },
+      create: { tenantId: tenant.id, companyId: company.id, code: d.code, name: d.name },
+      update: { name: d.name },
+    });
+    deptByCode.set(d.code, dep.id);
+  }
+  const positions = [
+    { code: 'foreman', name: 'РњР°СЃС‚РµСЂ СѓС‡Р°СЃС‚РєР°' },
+    { code: 'worker', name: 'Р Р°Р±РѕС‡РёР№' },
+    { code: 'accountant', name: 'Р‘СѓС…РіР°Р»С‚РµСЂ' },
+    { code: 'manager', name: 'РњРµРЅРµРґР¶РµСЂ РїРѕ РїСЂРѕРґР°Р¶Р°Рј' },
+  ];
+  const posByCode = new Map<string, string>();
+  for (const p of positions) {
+    const pos = await prisma.position.upsert({
+      where: { companyId_code: { companyId: company.id, code: p.code } },
+      create: { tenantId: tenant.id, companyId: company.id, code: p.code, name: p.name },
+      update: { name: p.name },
+    });
+    posByCode.set(p.code, pos.id);
+  }
+  const employees = [
+    { num: 1, fullName: 'РђР·РёР· РљР°СЂРёРјРѕРІ', dept: 'prod', pos: 'foreman', salary: 600_000_000n, phone: '+998 90 100 10 01' },
+    { num: 2, fullName: 'Р”РёР»РЅРѕР·Р° Р®СЃСѓРїРѕРІР°', dept: 'admin', pos: 'accountant', salary: 550_000_000n, phone: '+998 90 100 10 02' },
+    { num: 3, fullName: 'Р СѓСЃС‚Р°Рј РќРёСЏР·РѕРІ', dept: 'prod', pos: 'worker', salary: 400_000_000n, phone: '+998 90 100 10 03' },
+    { num: 4, fullName: 'РњР°Р»РёРєР° РЎР°С„Р°СЂРѕРІР°', dept: 'sales', pos: 'manager', salary: 500_000_000n, phone: '+998 90 100 10 04' },
+  ];
+  const empByNum = new Map<number, string>();
+  for (const e of employees) {
+    const number = `EMP-2026-${String(e.num).padStart(5, '0')}`;
+    const emp = await prisma.employee.upsert({
+      where: { tenantId_number: { tenantId: tenant.id, number } },
+      create: { tenantId: tenant.id, companyId: company.id, number, fullName: e.fullName, departmentId: deptByCode.get(e.dept)!, positionId: posByCode.get(e.pos)!, baseSalaryMinor: e.salary, phone: e.phone, hireDate: new Date('2025-01-15') },
+      update: { departmentId: deptByCode.get(e.dept)!, positionId: posByCode.get(e.pos)!, baseSalaryMinor: e.salary },
+    });
+    empByNum.set(e.num, emp.id);
+  }
+  await prisma.numberSequence.upsert({ where: { tenantId_key: { tenantId: tenant.id, key: 'employee' } }, create: { tenantId: tenant.id, key: 'employee', value: employees.length }, update: {} });
+
+  // Timesheet for June 2026 (worked = norm for everyone).
+  const attCount = await prisma.attendance.count({ where: { tenantId: tenant.id } });
+  if (attCount === 0) {
+    for (const e of employees) {
+      await prisma.attendance.create({ data: { tenantId: tenant.id, employeeId: empByNum.get(e.num)!, periodCode: '2026-06', workedDays: 22, normDays: 22 } });
+    }
+  }
+  // A pending vacation request.
+  const leaveCount = await prisma.leaveRequest.count({ where: { tenantId: tenant.id } });
+  if (leaveCount === 0) {
+    await prisma.leaveRequest.create({ data: { tenantId: tenant.id, employeeId: empByNum.get(1)!, type: 'vacation', startDate: new Date('2026-08-03'), endDate: new Date('2026-08-16'), days: 14, reason: 'Р•Р¶РµРіРѕРґРЅС‹Р№ РѕС‚РїСѓСЃРє', createdBy: admin.id } });
+  }
+  // A draft payroll run for June 2026 (worked = norm в†’ gross = base, 12% income tax).
+  // Reset payroll each seed so repeated test runs start clean (tests create extra periods
+  // that would otherwise collide as PERIOD_EXISTS on the next run). Items cascade.
+  await prisma.payrollRun.deleteMany({ where: { tenantId: tenant.id } });
+  {
+    const run = await prisma.payrollRun.create({ data: { tenantId: tenant.id, periodCode: '2026-06', normDays: 22, createdBy: admin.id } });
+    let g = 0n, t = 0n, n = 0n;
+    for (const e of employees) {
+      const gross = e.salary;
+      const tax = (gross * 12n) / 100n;
+      const net = gross - tax;
+      g += gross; t += tax; n += net;
+      await prisma.payrollItem.create({ data: { tenantId: tenant.id, runId: run.id, employeeId: empByNum.get(e.num)!, employeeName: e.fullName, baseSalaryMinor: e.salary, workedDays: 22, normDays: 22, grossMinor: gross, taxMinor: tax, netMinor: net } });
+    }
+    await prisma.payrollRun.update({ where: { id: run.id }, data: { totalGrossMinor: g, totalTaxMinor: t, totalNetMinor: n } });
+  }
+
+  // 14) POS / РљР°СЃСЃР° demo data (Stage 15) вЂ” one till on the main warehouse using the
+  // default retail price list (idempotent).
+  const defaultList = await prisma.priceList.findFirst({ where: { tenantId: tenant.id, isDefault: true } });
+  await prisma.posRegister.upsert({
+    where: { tenantId_code: { tenantId: tenant.id, code: 'POS-1' } },
+    create: { tenantId: tenant.id, name: 'РљР°СЃСЃР° в„–1 (СЂРѕР·РЅРёС†Р°)', code: 'POS-1', warehouseId: whMain.id, priceListId: defaultList?.id ?? null },
+    update: { warehouseId: whMain.id, priceListId: defaultList?.id ?? null },
+  });
+
+  // 15) РџСЂРѕРµРєС‚С‹ demo data (Stage 16) вЂ” one project with stages, tasks and time (idempotent).
+  const projectCount = await prisma.project.count({ where: { tenantId: tenant.id } });
+  if (projectCount === 0) {
+    const mgr = empByNum.get(1)!; // РђР·РёР· РљР°СЂРёРјРѕРІ
+    const project = await prisma.project.create({ data: { tenantId: tenant.id, code: 'PRJ-2026-00001', name: 'РњРѕРґРµСЂРЅРёР·Р°С†РёСЏ РїСЂРѕРёР·РІРѕРґСЃС‚РІРµРЅРЅРѕР№ Р»РёРЅРёРё', description: 'РћР±РЅРѕРІР»РµРЅРёРµ РѕР±РѕСЂСѓРґРѕРІР°РЅРёСЏ С†РµС…Р° в„–1 Рё Р·Р°РїСѓСЃРє РЅРѕРІРѕР№ Р»РёРЅРёРё.', customerName: 'Р’РЅСѓС‚СЂРµРЅРЅРёР№ РїСЂРѕРµРєС‚', managerId: mgr, managerName: 'РђР·РёР· РљР°СЂРёРјРѕРІ', status: 'active', startDate: new Date('2026-06-01'), budgetMinor: 5_000_000_000n, createdBy: admin.id } });
+    const stAnalysis = await prisma.projectStage.create({ data: { tenantId: tenant.id, projectId: project.id, name: 'РђРЅР°Р»РёР· Рё РїСЂРѕРµРєС‚РёСЂРѕРІР°РЅРёРµ', sortOrder: 0, status: 'done' } });
+    const stBuild = await prisma.projectStage.create({ data: { tenantId: tenant.id, projectId: project.id, name: 'РњРѕРЅС‚Р°Р¶ Рё РЅР°Р»Р°РґРєР°', sortOrder: 1, status: 'active' } });
+    await prisma.projectStage.create({ data: { tenantId: tenant.id, projectId: project.id, name: 'Р—Р°РїСѓСЃРє', sortOrder: 2, status: 'pending' } });
+    const tasks = [
+      { title: 'РћР±СЃР»РµРґРѕРІР°РЅРёРµ С†РµС…Р°', stage: stAnalysis.id, assignee: empByNum.get(1)!, name: 'РђР·РёР· РљР°СЂРёРјРѕРІ', status: 'done', priority: 'high', est: 16 },
+      { title: 'РЎРїРµС†РёС„РёРєР°С†РёСЏ РѕР±РѕСЂСѓРґРѕРІР°РЅРёСЏ', stage: stAnalysis.id, assignee: empByNum.get(2)!, name: 'Р”РёР»РЅРѕР·Р° Р®СЃСѓРїРѕРІР°', status: 'done', priority: 'normal', est: 8 },
+      { title: 'РњРѕРЅС‚Р°Р¶ Р»РёРЅРёРё', stage: stBuild.id, assignee: empByNum.get(3)!, name: 'Р СѓСЃС‚Р°Рј РќРёСЏР·РѕРІ', status: 'in_progress', priority: 'urgent', est: 40 },
+      { title: 'РџСѓСЃРєРѕРЅР°Р»Р°РґРєР°', stage: stBuild.id, assignee: empByNum.get(1)!, name: 'РђР·РёР· РљР°СЂРёРјРѕРІ', status: 'todo', priority: 'high', est: 24 },
+      { title: 'РћР±СѓС‡РµРЅРёРµ РїРµСЂСЃРѕРЅР°Р»Р°', stage: null as string | null, assignee: empByNum.get(4)!, name: 'РњР°Р»РёРєР° РЎР°С„Р°СЂРѕРІР°', status: 'todo', priority: 'normal', est: 12 },
+    ];
+    let so = 0;
+    for (const t of tasks) {
+      await prisma.projectTask.create({ data: { tenantId: tenant.id, projectId: project.id, stageId: t.stage, title: t.title, assigneeId: t.assignee, assigneeName: t.name, status: t.status, priority: t.priority, estimateHours: D(t.est), sortOrder: so++, createdBy: admin.id } });
+    }
+    // A couple of logged time entries (cost = hours Г— salary/176).
+    const salaryByEmp = new Map([[empByNum.get(1)!, 600_000_000n], [empByNum.get(3)!, 400_000_000n]]);
+    const logs = [
+      { emp: empByNum.get(1)!, name: 'РђР·РёР· РљР°СЂРёРјРѕРІ', date: new Date('2026-06-10'), hours: 8, note: 'РћР±СЃР»РµРґРѕРІР°РЅРёРµ С†РµС…Р°' },
+      { emp: empByNum.get(3)!, name: 'Р СѓСЃС‚Р°Рј РќРёСЏР·РѕРІ', date: new Date('2026-06-18'), hours: 8, note: 'РњРѕРЅС‚Р°Р¶' },
+      { emp: empByNum.get(3)!, name: 'Р СѓСЃС‚Р°Рј РќРёСЏР·РѕРІ', date: new Date('2026-06-19'), hours: 6, note: 'РњРѕРЅС‚Р°Р¶' },
+    ];
+    for (const l of logs) {
+      const hourly = (salaryByEmp.get(l.emp) ?? 0n) / 176n;
+      const cost = BigInt(Math.round(l.hours * Number(hourly)));
+      await prisma.timeEntry.create({ data: { tenantId: tenant.id, projectId: project.id, employeeId: l.emp, employeeName: l.name, date: l.date, hours: D(l.hours), note: l.note, costMinor: cost, createdBy: admin.id } });
+    }
+    await prisma.numberSequence.upsert({ where: { tenantId_key: { tenantId: tenant.id, key: 'project' } }, create: { tenantId: tenant.id, key: 'project', value: 1 }, update: {} });
+  }
+
+  // 16) Р›РѕРіРёСЃС‚РёРєР° demo data (Stage 17) вЂ” a small fleet + one planned delivery (idempotent).
+  const vehicleCount = await prisma.vehicle.count({ where: { tenantId: tenant.id } });
+  if (vehicleCount === 0) {
+    const truck = await prisma.vehicle.create({ data: { tenantId: tenant.id, plate: '01A123BC', model: 'Isuzu NQR', type: 'truck', capacityKg: D(5000), status: 'available', driverId: empByNum.get(3)!, driverName: 'Р СѓСЃС‚Р°Рј РќРёСЏР·РѕРІ' } });
+    await prisma.vehicle.create({ data: { tenantId: tenant.id, plate: '01A777AA', model: 'Chevrolet Damas', type: 'van', capacityKg: D(600), status: 'available' } });
+    const delivery = await prisma.delivery.create({ data: { tenantId: tenant.id, number: 'DLV-2026-00001', vehicleId: truck.id, vehiclePlate: truck.plate, driverId: empByNum.get(3)!, driverName: 'Р СѓСЃС‚Р°Рј РќРёСЏР·РѕРІ', status: 'planned', scheduledDate: new Date('2026-07-25'), costMinor: 30_000_000n, note: 'Р Р°Р·РІРѕР· РіРѕС‚РѕРІРѕР№ РїСЂРѕРґСѓРєС†РёРё', createdBy: admin.id } });
+    const stops = [
+      { address: 'РўР°С€РєРµРЅС‚, СѓР». РђРјРёСЂР° РўРµРјСѓСЂР°, 15', customer: 'Tashkent Retail Group', ref: 'SO-2026-0001' },
+      { address: 'РЎР°РјР°СЂРєР°РЅРґ, СѓР». Р РµРіРёСЃС‚Р°РЅ, 8', customer: 'Samarkand Trade LLC', ref: null as string | null },
+      { address: 'Р‘СѓС…Р°СЂР°, СѓР». РќР°РєС€Р±Р°РЅРґРё, 22', customer: 'Bukhara Distributors', ref: null as string | null },
+    ];
+    for (let i = 0; i < stops.length; i++) {
+      await prisma.deliveryStop.create({ data: { tenantId: tenant.id, deliveryId: delivery.id, sequence: i, address: stops[i].address, customerName: stops[i].customer, salesRef: stops[i].ref } });
+    }
+    await prisma.numberSequence.upsert({ where: { tenantId_key: { tenantId: tenant.id, key: 'delivery' } }, create: { tenantId: tenant.id, key: 'delivery', value: 1 }, update: {} });
+  }
+
+  // 17) РџСЂРѕРёР·РІРѕРґСЃС‚РІРѕ 2.0 demo data (Stage 18) вЂ” work centers + routing on the demo order (idempotent).
+  const wcCount = await prisma.workCenter.count({ where: { tenantId: tenant.id } });
+  if (wcCount === 0) {
+    const centers = [
+      { code: 'cut', name: 'Р Р°СЃРєСЂРѕР№ РјРµС‚Р°Р»Р»Р°', type: 'machining', rate: 15_000_000n },
+      { code: 'weld', name: 'РЎРІР°СЂРѕС‡РЅС‹Р№ СѓС‡Р°СЃС‚РѕРє', type: 'welding', rate: 18_000_000n },
+      { code: 'paint', name: 'РџРѕРєСЂР°СЃРѕС‡РЅР°СЏ РєР°РјРµСЂР°', type: 'painting', rate: 12_000_000n },
+      { code: 'qc', name: 'РћРўРљ', type: 'qc', rate: 10_000_000n },
+    ];
+    const wcById = new Map<string, { id: string; rate: bigint }>();
+    for (const c of centers) {
+      const wc = await prisma.workCenter.create({ data: { tenantId: tenant.id, code: c.code, name: c.name, type: c.type, hourlyCostMinor: c.rate, status: 'active' } });
+      wcById.set(c.code, { id: wc.id, rate: c.rate });
+    }
+    const order = await prisma.productionOrder.findFirst({ where: { tenantId: tenant.id }, orderBy: { createdAt: 'asc' } });
+    if (order) {
+      const ops = [
+        { code: 'cut', name: 'Р Р°СЃРєСЂРѕР№ Р»РёСЃС‚Р°', min: 120 },
+        { code: 'weld', name: 'РЎРІР°СЂРєР° РєРѕСЂРїСѓСЃР°', min: 180 },
+        { code: 'paint', name: 'РџРѕРєСЂР°СЃРєР°', min: 90 },
+        { code: 'qc', name: 'РљРѕРЅС‚СЂРѕР»СЊ РєР°С‡РµСЃС‚РІР°', min: 30 },
+      ];
+      let so = 0;
+      for (const op of ops) {
+        const wc = wcById.get(op.code)!;
+        const cost = (wc.rate * BigInt(op.min)) / 60n;
+        await prisma.productionOperation.create({ data: { tenantId: tenant.id, orderId: order.id, workCenterId: wc.id, workCenterName: centers.find((c) => c.code === op.code)!.name, sequence: so++, name: op.name, plannedMinutes: op.min, costMinor: cost, status: op.code === 'cut' ? 'done' : 'pending', ...(op.code === 'cut' ? { actualMinutes: 110, finishedAt: new Date('2026-06-15') } : {}) } });
+      }
+      await prisma.qualityCheck.create({ data: { tenantId: tenant.id, orderId: order.id, checkedQty: D(5), passedQty: D(4), defectQty: D(1), result: 'partial', inspector: 'Р”РёР»РЅРѕР·Р° Р®СЃСѓРїРѕРІР°', note: 'РћРґРёРЅ С€РєР°С„ СЃ РґРµС„РµРєС‚РѕРј РїРѕРєСЂР°СЃРєРё', createdBy: admin.id } });
+      await prisma.productionOrder.update({ where: { id: order.id }, data: { scrapQty: D(1) } });
+    }
+  }
+
+  // 18) РљР»РёРµРЅС‚СЃРєРёР№ РїРѕСЂС‚Р°Р» demo (Stage 21) вЂ” sales history for CUST-001 + a portal login.
+  const portalCustomerId = customerByCode.get('CUST-001');
+  if (portalCustomerId) {
+    const shelfId = productByS.get('SHELF-STD')!;
+    const cabinetId = productByS.get('CABINET-A1')!;
+    // A quotation + two sales orders (one confirmed, one shipped) so the portal has content.
+    if (!(await prisma.quotation.findFirst({ where: { number: 'QUO-2026-9001' } }))) {
+      await prisma.quotation.create({ data: { tenantId: tenant.id, number: 'QUO-2026-9001', customerId: portalCustomerId, status: 'sent', validUntil: new Date('2026-09-01'), createdBy: admin.id, items: { create: [
+        { productId: cabinetId, productName: 'Metal Cabinet A1', productSku: 'CABINET-A1', quantity: D(3), priceMinor: 13_500_000_00 },
+        { productId: shelfId, productName: 'Standard Shelf', productSku: 'SHELF-STD', quantity: D(10), priceMinor: 4_600_000_00 },
+      ] } } });
+    }
+    if (!(await prisma.salesOrder.findFirst({ where: { number: 'SO-2026-9001' } }))) {
+      await prisma.salesOrder.create({ data: { tenantId: tenant.id, number: 'SO-2026-9001', customerId: portalCustomerId, warehouseId: whMain.id, status: 'confirmed', createdBy: admin.id, items: { create: [
+        { productId: cabinetId, productName: 'Metal Cabinet A1', productSku: 'CABINET-A1', quantity: D(2), priceMinor: 13_500_000_00, reservedQty: D(2) },
+        { productId: shelfId, productName: 'Standard Shelf', productSku: 'SHELF-STD', quantity: D(5), priceMinor: 4_600_000_00, reservedQty: D(5) },
+      ] } } });
+    }
+    if (!(await prisma.salesOrder.findFirst({ where: { number: 'SO-2026-9002' } }))) {
+      await prisma.salesOrder.create({ data: { tenantId: tenant.id, number: 'SO-2026-9002', customerId: portalCustomerId, warehouseId: whMain.id, status: 'shipped', createdBy: admin.id, items: { create: [
+        { productId: shelfId, productName: 'Standard Shelf', productSku: 'SHELF-STD', quantity: D(3), priceMinor: 4_600_000_00, shippedQty: D(3) },
+      ] } } });
+    }
+
+    const portalHash = await bcrypt.hash('Client123!', 12);
+    await prisma.customerUser.upsert({
+      where: { tenantId_email: { tenantId: tenant.id, email: 'client@tashkent-retail.com' } },
+      create: { tenantId: tenant.id, customerId: portalCustomerId, email: 'client@tashkent-retail.com', passwordHash: portalHash, fullName: 'Tashkent Retail вЂ” РїРѕСЂС‚Р°Р»', status: 'active' },
+      update: { customerId: portalCustomerId, passwordHash: portalHash, status: 'active' },
+    });
+  }
+
+  // 12b) Initialize per-tenant number sequences to the current maxima so runtime
+  // allocation continues past any already-seeded documents (idempotent).
+  const jeCount = await prisma.journalEntry.count({ where: { tenantId: tenant.id } });
+  const ctCount = await prisma.cashTransaction.count({ where: { tenantId: tenant.id } });
+  const docCnt = await prisma.document.count({ where: { tenantId: tenant.id } });
+  await prisma.numberSequence.upsert({ where: { tenantId_key: { tenantId: tenant.id, key: 'journal' } }, create: { tenantId: tenant.id, key: 'journal', value: jeCount }, update: {} });
+  await prisma.numberSequence.upsert({ where: { tenantId_key: { tenantId: tenant.id, key: 'cash_tx' } }, create: { tenantId: tenant.id, key: 'cash_tx', value: ctCount }, update: {} });
+  await prisma.numberSequence.upsert({ where: { tenantId_key: { tenantId: tenant.id, key: 'document' } }, create: { tenantId: tenant.id, key: 'document', value: docCnt }, update: {} });
+
+  console.log('\nвњ… Seed complete.');
+  console.log('   Tenant:      demo-factory (Demo Factory LLC)');
+  console.log(`   Owner login: ${adminEmail} / ${adminPassword}`);
+  console.log('   Operator:    operator@demo-factory.com / Operator123!');
+}
+
+main()
+  .catch((e) => { console.error(e); process.exit(1); })
+  .finally(() => prisma.$disconnect());
+

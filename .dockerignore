@@ -1,0 +1,38 @@
+# Dependencies & build artifacts (installed/generated inside the image)
+node_modules
+web/node_modules
+web/.nuxt
+web/.output
+web/dist
+dist
+build
+
+# Local embedded-Postgres data (dev only — never ship it)
+.pgdata
+**/.pgdata
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# Version control / editor / OS cruft
+.git
+.gitignore
+.github
+.vscode
+.idea
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Docs & deployment manifests (not needed in the runtime image)
+deploy
+*.md
+!prisma/**
+
+# Tests / scratch
+coverage
+.tmp
+tmp

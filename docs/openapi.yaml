@@ -1,0 +1,2098 @@
+openapi: 3.0.3
+info:
+  title: TTR ONE — ERP Platform API
+  version: 0.1.0
+  description: |
+    REST API for **TTR ONE**, a multi-tenant SaaS ERP for Uzbekistan
+    (Node/Fastify + PostgreSQL/Prisma backend, Nuxt 3 SPA frontend).
+
+    ## Conventions
+    - **Base URL**: all endpoints live under `/api/v1`.
+    - **Auth**: JWT Bearer. Obtain an `accessToken` from `POST /auth/login`
+      (15-minute TTL) and rotate it via `POST /auth/refresh`.
+    - **Money**: all monetary amounts are integers in **minor units (tiyin)**,
+      e.g. `1 000 000` = 10 000.00 UZS. Fields end in `Minor`.
+    - **Quantities**: decimal strings, bounded to 6 decimal places.
+    - **Multi-tenancy**: every record is scoped to the caller's tenant
+      (derived from the token); there is no tenant id in the path.
+    - **Errors**: uniform envelope `{ "error": { "code": "...", "message": "..." } }`.
+    - **Pagination**: list endpoints accept `page`, `pageSize` (max 200),
+      `sort`, `order` (`asc`/`desc`), `search`, and return a `meta` object
+      `{ page, pageSize, total, totalPages }`.
+  contact:
+    name: TTR ONE
+servers:
+  - url: http://localhost:3000/api/v1
+    description: Local development
+
+security:
+  - apiKeyAuth: []
+  - bearerAuth: []
+
+tags:
+  - name: auth
+    description: Authentication, registration, MFA, PIN, sessions
+  - name: org
+    description: Companies and branches
+  - name: catalog
+    description: Units, categories, products, barcodes
+  - name: warehouse
+    description: Warehouses, on-hand stock, movement ledger, transfers
+  - name: inventory
+    description: Bin locations, counts, batches, serials, reorder rules
+  - name: procurement
+    description: Suppliers, prices, requests, purchase orders, receipts, invoices
+  - name: sales
+    description: Customers, price lists, quotations, orders, shipments, returns
+  - name: crm
+    description: Deals and sales funnel
+  - name: production
+    description: Bills of materials and production orders
+  - name: finance
+    description: Cash/bank accounts, chart of accounts, journal, reports, VAT
+  - name: analytics
+    description: KPIs, series, tabular reports, export, forecast
+  - name: ai
+    description: AI assistant, invoice OCR, AI settings
+  - name: studio
+    description: Marketplace, integrations, no-code forms
+  - name: platform
+    description: Notifications, search, files, jobs, tenders, realtime
+  - name: documents
+    description: Templates, documents, versions, approval chain
+  - name: tenant
+    description: Tenant settings, branding, module toggles
+  - name: billing
+    description: Plans, subscription, invoices, payment
+  - name: admin
+    description: Users, roles, invitations, audit
+
+paths:
+  # ==================== AUTH ====================
+  /auth/register:
+    post:
+      tags: [auth]
+      summary: Self-registration — create a tenant + owner and log in
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '201':
+          description: Tenant created and session issued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Log in with email + password (optional tenant slug and MFA code)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: Rotate a refresh token for a new access + refresh pair
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '200':
+          description: New token pair
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken: { type: string }
+                  refreshToken: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoke all refresh tokens for the current user
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+  /auth/me:
+    get:
+      tags: [auth]
+      summary: Current authenticated user + permissions
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/change-password:
+    post:
+      tags: [auth]
+      summary: Change password (invalidates all sessions)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: { type: string }
+                newPassword: { type: string, minLength: 8 }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+  /auth/forgot-password:
+    post:
+      tags: [auth]
+      summary: Request a password-reset token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+                tenant: { type: string }
+      responses:
+        '200':
+          description: Always ok (does not reveal whether the email exists)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  message: { type: string }
+                  devResetToken: { type: string, description: Dev only }
+  /auth/reset-password:
+    post:
+      tags: [auth]
+      summary: Set a new password using a reset token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, newPassword]
+              properties:
+                token: { type: string }
+                newPassword: { type: string, minLength: 8 }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+  /auth/mfa/setup:
+    post:
+      tags: [auth]
+      summary: Begin TOTP MFA enrolment — returns a secret + otpauth URL
+      responses:
+        '200':
+          description: Pending MFA secret
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secret: { type: string }
+                  otpauth: { type: string }
+  /auth/mfa/enable:
+    post:
+      tags: [auth]
+      summary: Confirm and enable MFA with a TOTP code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties: { code: { type: string } }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+  /auth/pin/set:
+    post:
+      tags: [auth]
+      summary: Set a 4–8 digit mobile PIN
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pin]
+              properties: { pin: { type: string, pattern: '^\d{4,8}$' } }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+  /auth/sessions:
+    get:
+      tags: [auth]
+      summary: List active sessions/devices
+      responses:
+        '200':
+          description: Sessions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        userAgent: { type: string, nullable: true }
+                        ip: { type: string, nullable: true }
+                        createdAt: { type: string, format: date-time }
+
+  # ==================== ORG ====================
+  /org/companies:
+    get:
+      tags: [org]
+      summary: List companies
+      responses:
+        '200':
+          description: Companies
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  companies:
+                    type: array
+                    items: { type: object }
+    post:
+      tags: [org]
+      summary: Create a company
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, code]
+              properties:
+                name: { type: string }
+                code: { type: string }
+                legalName: { type: string }
+                taxId: { type: string }
+                currency: { type: string, default: UZS }
+      responses:
+        '201': { description: Created }
+  /org/branches:
+    get:
+      tags: [org]
+      summary: List branches
+      responses:
+        '200': { description: Branches }
+    post:
+      tags: [org]
+      summary: Create a branch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [companyId, name, code]
+              properties:
+                companyId: { type: string }
+                name: { type: string }
+                code: { type: string }
+                address: { type: string }
+      responses:
+        '201': { description: Created }
+
+  # ==================== CATALOG ====================
+  /catalog/products:
+    get:
+      tags: [catalog]
+      summary: List products (paginated, searchable, sortable)
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+        - $ref: '#/components/parameters/sort'
+        - $ref: '#/components/parameters/order'
+        - $ref: '#/components/parameters/search'
+      responses:
+        '200':
+          description: Products
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  products:
+                    type: array
+                    items: { $ref: '#/components/schemas/Product' }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+                  priceVisible: { type: boolean }
+    post:
+      tags: [catalog]
+      summary: Create a product
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductInput' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  product: { $ref: '#/components/schemas/Product' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /catalog/products/{id}:
+    patch:
+      tags: [catalog]
+      summary: Update a product (SKU immutable)
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductInput' }
+      responses:
+        '200': { description: Updated }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /catalog/products/{id}/barcode:
+    post:
+      tags: [catalog]
+      summary: Generate a unique EAN-13 barcode for a product
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      responses:
+        '200': { description: Product with barcode }
+  /catalog/products/by-barcode/{code}:
+    get:
+      tags: [catalog]
+      summary: Look up a product by barcode (scan)
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Product }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /catalog/units:
+    get:
+      tags: [catalog]
+      summary: List units of measure
+      responses: { '200': { description: Units } }
+    post:
+      tags: [catalog]
+      summary: Create a unit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, code]
+              properties:
+                name: { type: string }
+                code: { type: string }
+                precision: { type: integer, default: 0 }
+      responses: { '201': { description: Created } }
+  /catalog/categories:
+    get:
+      tags: [catalog]
+      summary: List categories
+      responses: { '200': { description: Categories } }
+    post:
+      tags: [catalog]
+      summary: Create a category
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, code]
+              properties:
+                name: { type: string }
+                code: { type: string }
+                parentId: { type: string }
+      responses: { '201': { description: Created } }
+
+  # ==================== WAREHOUSE ====================
+  /warehouse/warehouses:
+    get:
+      tags: [warehouse]
+      summary: List warehouses (record-level scoped)
+      responses: { '200': { description: Warehouses } }
+    post:
+      tags: [warehouse]
+      summary: Create a warehouse
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, code]
+              properties:
+                name: { type: string }
+                code: { type: string }
+                companyId: { type: string }
+                address: { type: string }
+      responses: { '201': { description: Created } }
+  /warehouse/stock:
+    get:
+      tags: [warehouse]
+      summary: On-hand stock per (warehouse, product)
+      parameters:
+        - name: warehouseId
+          in: query
+          schema: { type: string }
+        - name: lowOnly
+          in: query
+          description: '"1" filters to items with available <= 0'
+          schema: { type: string }
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+      responses:
+        '200':
+          description: Stock rows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stock:
+                    type: array
+                    items: { $ref: '#/components/schemas/StockRow' }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+  /warehouse/movements:
+    get:
+      tags: [warehouse]
+      summary: Movement ledger (filter by warehouse/product/type)
+      parameters:
+        - name: warehouseId
+          in: query
+          schema: { type: string }
+        - name: productId
+          in: query
+          schema: { type: string }
+        - name: type
+          in: query
+          schema: { type: string, enum: [IN, OUT, ADJUST, TRANSFER_IN, TRANSFER_OUT, RECEIPT] }
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+      responses:
+        '200': { description: Movements }
+    post:
+      tags: [warehouse]
+      summary: Perform a stock movement (receive / issue / adjust)
+      description: >
+        `IN`/`OUT` use a positive quantity; `ADJUST` sets the absolute on-hand.
+        Over-issue returns `INSUFFICIENT_STOCK`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [warehouseId, productId, type, quantity]
+              properties:
+                warehouseId: { type: string }
+                productId: { type: string }
+                type: { type: string, enum: [IN, OUT, ADJUST] }
+                quantity: { type: number }
+                reason: { type: string }
+      responses:
+        '201': { description: Movement recorded }
+        '400': { $ref: '#/components/responses/ValidationError' }
+  /warehouse/transfer:
+    post:
+      tags: [warehouse]
+      summary: Transfer stock between warehouses (atomic OUT + IN)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fromWarehouseId, toWarehouseId, productId, quantity]
+              properties:
+                fromWarehouseId: { type: string }
+                toWarehouseId: { type: string }
+                productId: { type: string }
+                quantity: { type: number }
+                reason: { type: string }
+      responses:
+        '201': { $ref: '#/components/responses/Ok' }
+
+  # ==================== INVENTORY (WMS) ====================
+  /inventory/locations:
+    get:
+      tags: [inventory]
+      summary: List bin locations
+      responses: { '200': { description: Locations } }
+    post:
+      tags: [inventory]
+      summary: Create a bin location
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [warehouseId, code, name]
+              properties:
+                warehouseId: { type: string }
+                code: { type: string }
+                name: { type: string }
+                kind: { type: string, enum: [zone, rack, shelf, bin], default: bin }
+      responses: { '201': { description: Created } }
+  /inventory/counts:
+    get:
+      tags: [inventory]
+      summary: List inventory counts
+      responses: { '200': { description: Counts } }
+    post:
+      tags: [inventory]
+      summary: Start an inventory count for a warehouse
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [warehouseId]
+              properties:
+                warehouseId: { type: string }
+                note: { type: string }
+      responses: { '201': { description: Created } }
+  /inventory/counts/{id}/complete:
+    post:
+      tags: [inventory]
+      summary: Complete a count and post variances as ADJUST movements
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      responses: { '200': { $ref: '#/components/responses/Ok' } }
+  /inventory/batches/receive:
+    post:
+      tags: [inventory]
+      summary: Receive a batch/lot with an expiry date
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [warehouseId, productId, batchNo, quantity]
+              properties:
+                warehouseId: { type: string }
+                productId: { type: string }
+                batchNo: { type: string }
+                expiryDate: { type: string, format: date }
+                quantity: { type: number }
+      responses: { '201': { description: Created } }
+  /inventory/batches/expiring:
+    get:
+      tags: [inventory]
+      summary: Batches expiring within a window
+      parameters:
+        - name: days
+          in: query
+          schema: { type: integer }
+      responses: { '200': { description: Expiring batches } }
+  /inventory/low-stock:
+    get:
+      tags: [inventory]
+      summary: Items below their reorder point
+      responses: { '200': { description: Low-stock items } }
+  /inventory/reorder/auto-request:
+    post:
+      tags: [inventory]
+      summary: Auto-generate a purchase request from low stock
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                warehouseId: { type: string }
+                note: { type: string }
+      responses: { '201': { description: Purchase request created } }
+
+  # ==================== PROCUREMENT ====================
+  /procurement/suppliers:
+    get:
+      tags: [procurement]
+      summary: List suppliers (paginated/searchable)
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/search'
+      responses: { '200': { description: Suppliers } }
+    post:
+      tags: [procurement]
+      summary: Create a supplier
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PartyInput' }
+      responses:
+        '201': { description: Created }
+        '400': { $ref: '#/components/responses/ValidationError' }
+  /procurement/compare:
+    get:
+      tags: [procurement]
+      summary: Compare supplier offers for a product (cheapest first)
+      parameters:
+        - name: productId
+          in: query
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: Ranked offers } }
+  /procurement/requests:
+    get:
+      tags: [procurement]
+      summary: List purchase requests
+      responses: { '200': { description: Requests } }
+    post:
+      tags: [procurement]
+      summary: Create a purchase request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                note: { type: string }
+                items:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      productId: { type: string }
+                      quantity: { type: number }
+      responses: { '201': { description: Created } }
+  /procurement/requests/{id}/approve:
+    post:
+      tags: [procurement]
+      summary: Approve a purchase request
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      responses: { '200': { $ref: '#/components/responses/Ok' } }
+  /procurement/requests/{id}/convert:
+    post:
+      tags: [procurement]
+      summary: Convert an approved request into a purchase order
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [supplierId]
+              properties:
+                supplierId: { type: string }
+                warehouseId: { type: string }
+                prices:
+                  type: object
+                  additionalProperties: { type: integer }
+      responses: { '201': { description: Purchase order created } }
+  /procurement/orders:
+    get:
+      tags: [procurement]
+      summary: List purchase orders
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/page'
+      responses: { '200': { description: Purchase orders } }
+    post:
+      tags: [procurement]
+      summary: Create a purchase order
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [supplierId, items]
+              properties:
+                supplierId: { type: string }
+                warehouseId: { type: string }
+                expectedAt: { type: string, format: date }
+                note: { type: string }
+                items:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      productId: { type: string }
+                      quantity: { type: number }
+                      priceMinor: { type: integer }
+      responses: { '201': { description: Created } }
+  /procurement/orders/{id}:
+    get:
+      tags: [procurement]
+      summary: Purchase order detail (items, receipts, invoices)
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      responses:
+        '200': { description: Order }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /procurement/orders/{id}/send:
+    post:
+      tags: [procurement]
+      summary: Send a draft PO to the supplier
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      responses: { '200': { $ref: '#/components/responses/Ok' } }
+  /procurement/orders/{id}/receive:
+    post:
+      tags: [procurement]
+      summary: Receive goods against a PO (stock IN + AP posting)
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                warehouseId: { type: string }
+                note: { type: string }
+                items:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      productId: { type: string }
+                      quantity: { type: number }
+      responses:
+        '201': { description: Goods receipt created }
+        '400': { $ref: '#/components/responses/ValidationError' }
+  /procurement/invoices:
+    get:
+      tags: [procurement]
+      summary: List supplier invoices
+      responses: { '200': { description: Invoices } }
+    post:
+      tags: [procurement]
+      summary: Register a supplier invoice (runs 3-way match)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [supplierId, number, amountMinor]
+              properties:
+                supplierId: { type: string }
+                poId: { type: string }
+                number: { type: string }
+                amountMinor: { type: integer }
+      responses: { '201': { description: Invoice + match result } }
+  /procurement/invoices/{id}/pay:
+    post:
+      tags: [procurement]
+      summary: Mark a matched invoice as paid
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+
+  # ==================== SALES ====================
+  /sales/customers:
+    get:
+      tags: [sales]
+      summary: List customers
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/search'
+      responses: { '200': { description: Customers } }
+    post:
+      tags: [sales]
+      summary: Create a customer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PartyInput' }
+      responses: { '201': { description: Created } }
+  /sales/quotations:
+    get:
+      tags: [sales]
+      summary: List quotations (commercial offers)
+      responses: { '200': { description: Quotations } }
+    post:
+      tags: [sales]
+      summary: Create a quotation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [customerId, items]
+              properties:
+                customerId: { type: string }
+                note: { type: string }
+                validUntil: { type: string, format: date }
+                items:
+                  type: array
+                  items: { $ref: '#/components/schemas/OrderLineInput' }
+      responses: { '201': { description: Created } }
+  /sales/quotations/{id}/convert:
+    post:
+      tags: [sales]
+      summary: Convert an accepted quotation into a sales order
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                warehouseId: { type: string }
+                expectedAt: { type: string, format: date }
+      responses: { '201': { description: Sales order created } }
+  /sales/orders:
+    get:
+      tags: [sales]
+      summary: List sales orders
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/page'
+      responses: { '200': { description: Orders } }
+    post:
+      tags: [sales]
+      summary: Create a sales order
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [customerId, items]
+              properties:
+                customerId: { type: string }
+                warehouseId: { type: string }
+                expectedAt: { type: string, format: date }
+                note: { type: string }
+                discountPct: { type: integer, default: 0 }
+                items:
+                  type: array
+                  items: { $ref: '#/components/schemas/OrderLineInput' }
+      responses: { '201': { description: Created } }
+  /sales/orders/{id}:
+    get:
+      tags: [sales]
+      summary: Sales order detail (items, shipments, returns, totals)
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      responses:
+        '200': { description: Order }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /sales/orders/{id}/confirm:
+    post:
+      tags: [sales]
+      summary: Confirm a draft sales order
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      responses: { '200': { $ref: '#/components/responses/Ok' } }
+  /sales/orders/{id}/reserve:
+    post:
+      tags: [sales]
+      summary: Reserve stock (available-to-promise) for the order
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { warehouseId: { type: string } }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+  /sales/orders/{id}/ship:
+    post:
+      tags: [sales]
+      summary: Ship goods against the order (stock OUT + revenue/COGS postings)
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                warehouseId: { type: string }
+                note: { type: string }
+                items:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      productId: { type: string }
+                      quantity: { type: number }
+      responses:
+        '201': { description: Shipment created }
+        '400': { $ref: '#/components/responses/ValidationError' }
+  /sales/orders/{id}/cancel:
+    post:
+      tags: [sales]
+      summary: Cancel an order (releases reservations)
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      responses: { '200': { $ref: '#/components/responses/Ok' } }
+  /sales/returns:
+    get:
+      tags: [sales]
+      summary: List customer returns
+      responses: { '200': { description: Returns } }
+    post:
+      tags: [sales]
+      summary: Register a customer return (stock IN + reversal postings)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [warehouseId, items]
+              properties:
+                soId: { type: string }
+                warehouseId: { type: string }
+                reason: { type: string }
+                note: { type: string }
+                items:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      productId: { type: string }
+                      quantity: { type: number }
+      responses: { '201': { description: Return created } }
+  /sales/price-lists:
+    get:
+      tags: [sales]
+      summary: List price lists with items
+      responses: { '200': { description: Price lists } }
+    post:
+      tags: [sales]
+      summary: Create a price list
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                currency: { type: string, default: UZS }
+                isDefault: { type: boolean }
+      responses: { '201': { description: Created } }
+
+  # ==================== CRM ====================
+  /crm/deals:
+    get:
+      tags: [crm]
+      summary: List deals (optionally filtered by stage)
+      parameters:
+        - name: stage
+          in: query
+          schema: { type: string, enum: [lead, qualified, proposal, won, lost] }
+      responses: { '200': { description: Deals } }
+    post:
+      tags: [crm]
+      summary: Create a deal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string }
+                customerId: { type: string }
+                stage: { type: string, enum: [lead, qualified, proposal, won, lost] }
+                amountMinor: { type: integer }
+                probability: { type: integer }
+                note: { type: string }
+                expectedCloseAt: { type: string, format: date }
+      responses: { '201': { description: Created } }
+  /crm/funnel:
+    get:
+      tags: [crm]
+      summary: Kanban funnel — deals grouped by stage with totals
+      responses: { '200': { description: Funnel columns } }
+  /crm/deals/{id}/move:
+    post:
+      tags: [crm]
+      summary: Move a deal to another stage (loss requires a reason)
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stage]
+              properties:
+                stage: { type: string, enum: [lead, qualified, proposal, won, lost] }
+                lostReason: { type: string }
+      responses: { '200': { $ref: '#/components/responses/Ok' } }
+
+  # ==================== PRODUCTION ====================
+  /production/boms:
+    get:
+      tags: [production]
+      summary: List bills of materials
+      responses: { '200': { description: BOMs } }
+    post:
+      tags: [production]
+      summary: Create a BOM
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [productId, name, items]
+              properties:
+                productId: { type: string }
+                name: { type: string }
+                outputQty: { type: number, default: 1 }
+                notes: { type: string }
+                items:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      productId: { type: string }
+                      quantity: { type: number }
+      responses: { '201': { description: Created } }
+  /production/orders:
+    get:
+      tags: [production]
+      summary: List production orders
+      responses: { '200': { description: Orders } }
+    post:
+      tags: [production]
+      summary: Create a production order (from a BOM or explicit materials)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [quantity]
+              properties:
+                bomId: { type: string }
+                productId: { type: string }
+                quantity: { type: number }
+                warehouseId: { type: string }
+                plannedAt: { type: string, format: date }
+                note: { type: string }
+                items:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      productId: { type: string }
+                      requiredQty: { type: number }
+      responses: { '201': { description: Created } }
+  /production/orders/{id}/issue:
+    post:
+      tags: [production]
+      summary: Issue materials to production (stock OUT)
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      responses: { '200': { $ref: '#/components/responses/Ok' } }
+  /production/orders/{id}/complete:
+    post:
+      tags: [production]
+      summary: Complete an order — receive finished goods (stock IN)
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      responses: { '200': { $ref: '#/components/responses/Ok' } }
+
+  # ==================== FINANCE ====================
+  /finance/settings:
+    get:
+      tags: [finance]
+      summary: Costing method + VAT settings
+      responses: { '200': { description: Settings } }
+    patch:
+      tags: [finance]
+      summary: Update costing method / VAT
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                costingMethod: { type: string, enum: [avg, fifo] }
+                vatEnabled: { type: boolean }
+                vatRatePct: { type: integer }
+      responses: { '200': { description: Updated } }
+  /finance/accounts:
+    get:
+      tags: [finance]
+      summary: List cash/bank accounts with total balance
+      responses: { '200': { description: Accounts } }
+    post:
+      tags: [finance]
+      summary: Create a cash/bank account (posts opening balance)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                kind: { type: string, enum: [cash, bank, card], default: cash }
+                currency: { type: string, default: UZS }
+                accountNo: { type: string }
+                openingMinor: { type: integer, default: 0 }
+      responses: { '201': { description: Created } }
+  /finance/transactions:
+    get:
+      tags: [finance]
+      summary: List cash transactions
+      parameters:
+        - name: accountId
+          in: query
+          schema: { type: string }
+        - name: direction
+          in: query
+          schema: { type: string, enum: [in, out] }
+      responses: { '200': { description: Transactions } }
+    post:
+      tags: [finance]
+      summary: Record a receipt / payment (posts a balanced journal entry)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accountId, direction, amountMinor]
+              properties:
+                accountId: { type: string }
+                direction: { type: string, enum: [in, out] }
+                category: { type: string, enum: [sale, purchase, salary, vat, tax, rent, utility, other, refund] }
+                amountMinor: { type: integer }
+                date: { type: string, format: date }
+                counterparty: { type: string }
+                note: { type: string }
+      responses:
+        '201': { description: Transaction created }
+        '400': { $ref: '#/components/responses/ValidationError' }
+  /finance/chart:
+    get:
+      tags: [finance]
+      summary: Chart of accounts (auto-seeded on first read)
+      responses: { '200': { description: Ledger accounts } }
+    post:
+      tags: [finance]
+      summary: Add a ledger account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, name, type]
+              properties:
+                code: { type: string }
+                name: { type: string }
+                type: { type: string, enum: [asset, liability, equity, income, expense] }
+      responses: { '201': { description: Created } }
+  /finance/journal:
+    get:
+      tags: [finance]
+      summary: List journal entries
+      parameters:
+        - name: source
+          in: query
+          schema: { type: string }
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+      responses: { '200': { description: Entries } }
+    post:
+      tags: [finance]
+      summary: Post a manual journal entry (must balance)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lines]
+              properties:
+                date: { type: string, format: date }
+                memo: { type: string }
+                lines:
+                  type: array
+                  minItems: 2
+                  items:
+                    type: object
+                    properties:
+                      accountCode: { type: string }
+                      debitMinor: { type: integer, default: 0 }
+                      creditMinor: { type: integer, default: 0 }
+                      description: { type: string }
+      responses: { '201': { description: Entry posted } }
+  /finance/journal/{id}/reverse:
+    post:
+      tags: [finance]
+      summary: Reverse a posted journal entry
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      responses: { '201': { description: Reversal posted } }
+  /finance/reports/trial-balance:
+    get:
+      tags: [finance]
+      summary: Trial balance as of a date
+      parameters:
+        - name: asOf
+          in: query
+          schema: { type: string, format: date }
+      responses: { '200': { description: Trial balance } }
+  /finance/reports/pnl:
+    get:
+      tags: [finance]
+      summary: Profit & loss for a date range
+      parameters:
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+      responses: { '200': { description: P&L } }
+  /finance/reports/inventory-valuation:
+    get:
+      tags: [finance]
+      summary: On-hand valuation (weighted-average and FIFO)
+      responses: { '200': { description: Valuation } }
+  /finance/reports/vat:
+    get:
+      tags: [finance]
+      summary: VAT (QQS) report — output vs input for a period
+      responses: { '200': { description: VAT report } }
+  /finance/vat/settle:
+    post:
+      tags: [finance]
+      summary: Settle VAT for a period (posts the settlement entry)
+      responses: { '201': { description: Settled } }
+
+  # ==================== ANALYTICS ====================
+  /analytics/kpis:
+    get:
+      tags: [analytics]
+      summary: Headline KPIs for a date range
+      parameters:
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+      responses: { '200': { description: KPI snapshot } }
+  /analytics/series:
+    get:
+      tags: [analytics]
+      summary: Revenue time-series + top products
+      parameters:
+        - name: bucket
+          in: query
+          schema: { type: string, enum: [day, month] }
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+      responses: { '200': { description: Series } }
+  /analytics/reports/{type}:
+    get:
+      tags: [analytics]
+      summary: Build a tabular report by type
+      parameters:
+        - name: type
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Report table }
+        '400': { $ref: '#/components/responses/ValidationError' }
+  /analytics/reports/{type}/export:
+    get:
+      tags: [analytics]
+      summary: Export a report as CSV or XLSX
+      parameters:
+        - name: type
+          in: path
+          required: true
+          schema: { type: string }
+        - name: format
+          in: query
+          schema: { type: string, enum: [csv, xlsx], default: csv }
+      responses:
+        '200':
+          description: File download
+          content:
+            text/csv: {}
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet: {}
+  /analytics/forecast:
+    get:
+      tags: [analytics]
+      summary: Local demand forecast + reorder suggestions
+      parameters:
+        - name: lookback
+          in: query
+          schema: { type: integer, default: 90 }
+        - name: horizon
+          in: query
+          schema: { type: integer, default: 30 }
+      responses: { '200': { description: Forecast } }
+
+  # ==================== AI ====================
+  /ai/status:
+    get:
+      tags: [ai]
+      summary: Is AI usable now, with which provider/model
+      responses: { '200': { description: Status } }
+  /ai/settings:
+    get:
+      tags: [ai]
+      summary: AI settings (API key is write-only, never returned)
+      responses: { '200': { description: Settings } }
+    patch:
+      tags: [ai]
+      summary: Update AI provider/model/key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                provider: { type: string, enum: [anthropic, openai] }
+                model: { type: string }
+                apiKey: { type: string, description: 'Empty string clears the stored key' }
+      responses: { '200': { description: Updated } }
+  /ai/ask:
+    post:
+      tags: [ai]
+      summary: Ask the assistant a question over a live data snapshot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question: { type: string, minLength: 2, maxLength: 500 }
+      responses: { '200': { description: Answer } }
+  /ai/ocr-invoice:
+    post:
+      tags: [ai]
+      summary: Extract structured fields from an invoice image (OCR)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [imageBase64]
+              properties:
+                imageBase64: { type: string }
+                mediaType: { type: string, default: image/jpeg }
+      responses: { '200': { description: Extracted fields } }
+
+  # ==================== STUDIO ====================
+  /studio/marketplace:
+    get:
+      tags: [studio]
+      summary: Module marketplace catalog with install state + plan quota
+      responses: { '200': { description: Marketplace } }
+  /studio/integrations:
+    get:
+      tags: [studio]
+      summary: Integration connection status
+      responses: { '200': { description: Integrations } }
+    # per-provider connect/disconnect below
+  /studio/integrations/{provider}:
+    patch:
+      tags: [studio]
+      summary: Connect / configure an integration
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [config]
+              properties:
+                config:
+                  type: object
+                  additionalProperties: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /studio/forms:
+    get:
+      tags: [studio]
+      summary: List no-code custom forms
+      responses: { '200': { description: Forms } }
+    post:
+      tags: [studio]
+      summary: Create a custom form (field schema)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, name, fields]
+              properties:
+                key: { type: string }
+                name: { type: string }
+                description: { type: string }
+                icon: { type: string }
+                fields:
+                  type: array
+                  items: { $ref: '#/components/schemas/FormField' }
+      responses: { '201': { description: Created } }
+  /studio/forms/{id}/records:
+    post:
+      tags: [studio]
+      summary: Submit a record against a form
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                data:
+                  type: object
+                  additionalProperties: true
+      responses: { '201': { description: Record created } }
+
+  # ==================== PLATFORM ====================
+  /platform/notifications:
+    get:
+      tags: [platform]
+      summary: List notifications for the current user
+      parameters:
+        - name: unread
+          in: query
+          description: '"1" returns only unread'
+          schema: { type: string }
+        - $ref: '#/components/parameters/page'
+      responses: { '200': { description: Notifications + unreadCount } }
+  /platform/notifications/read-all:
+    post:
+      tags: [platform]
+      summary: Mark all notifications read
+      responses: { '200': { $ref: '#/components/responses/Ok' } }
+  /platform/search:
+    get:
+      tags: [platform]
+      summary: Global cross-entity search
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string }
+      responses: { '200': { description: Hits } }
+  /platform/files:
+    get:
+      tags: [platform]
+      summary: List attachments (optionally by ref)
+      parameters:
+        - name: refType
+          in: query
+          schema: { type: string }
+        - name: refId
+          in: query
+          schema: { type: string }
+      responses: { '200': { description: Files } }
+    post:
+      tags: [platform]
+      summary: Upload a file (base64 JSON, max 12 MB)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [filename, dataBase64]
+              properties:
+                filename: { type: string }
+                mime: { type: string }
+                dataBase64: { type: string }
+                refType: { type: string }
+                refId: { type: string }
+      responses:
+        '201': { description: Attachment created }
+        '400': { $ref: '#/components/responses/ValidationError' }
+  /platform/files/{id}/download:
+    get:
+      tags: [platform]
+      summary: Download a file
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      responses:
+        '200':
+          description: Binary file
+          content:
+            application/octet-stream: {}
+        '404': { $ref: '#/components/responses/NotFound' }
+  /platform/tenders:
+    get:
+      tags: [platform]
+      summary: List tenders parsed from public portals
+      parameters:
+        - name: source
+          in: query
+          schema: { type: string }
+        - name: q
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/page'
+      responses: { '200': { description: Tenders } }
+  /platform/tenders/refresh:
+    post:
+      tags: [platform]
+      summary: Refresh tenders from all portals now
+      responses: { '200': { description: Refresh result } }
+  /platform/realtime:
+    get:
+      tags: [platform]
+      summary: Server-Sent Events stream (token via query param)
+      security: []
+      parameters:
+        - name: token
+          in: query
+          required: true
+          description: Access token (EventSource cannot set headers)
+          schema: { type: string }
+      responses:
+        '200':
+          description: text/event-stream of notification/stock events
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ==================== DOCUMENTS ====================
+  /documents/templates:
+    get:
+      tags: [documents]
+      summary: List document templates
+      responses: { '200': { description: Templates } }
+    post:
+      tags: [documents]
+      summary: Create a template with {{placeholders}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, name, body]
+              properties:
+                code: { type: string }
+                name: { type: string }
+                kind: { type: string, enum: [contract, invoice, act, order, generic] }
+                body: { type: string }
+      responses: { '201': { description: Created } }
+  /documents/documents:
+    get:
+      tags: [documents]
+      summary: List documents
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/page'
+      responses: { '200': { description: Documents } }
+    post:
+      tags: [documents]
+      summary: Create a document (from template or free-form body)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string }
+                kind: { type: string, enum: [contract, invoice, act, order, generic] }
+                templateId: { type: string }
+                body: { type: string }
+                fields:
+                  type: object
+                  additionalProperties: { type: string }
+      responses: { '201': { description: Created } }
+  /documents/documents/{id}:
+    get:
+      tags: [documents]
+      summary: Document detail (versions, approvals, attachments)
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      responses:
+        '200': { description: Document }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /documents/documents/{id}/submit:
+    post:
+      tags: [documents]
+      summary: Submit for approval — build a sequential approver chain
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approverIds]
+              properties:
+                approverIds:
+                  type: array
+                  items: { type: string }
+      responses: { '200': { description: Pending } }
+  /documents/documents/{id}/approve:
+    post:
+      tags: [documents]
+      summary: Approve (sign) the caller's active step
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { comment: { type: string } }
+      responses: { '200': { description: Approved / finalized } }
+
+  # ==================== TENANT ====================
+  /tenant/settings:
+    get:
+      tags: [tenant]
+      summary: Tenant profile + module enablement
+      responses: { '200': { description: Settings } }
+  /tenant/branding:
+    patch:
+      tags: [tenant]
+      summary: Update white-label brand name / accent color
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                brandName: { type: string, nullable: true }
+                brandColor: { type: string, pattern: '^#[0-9a-fA-F]{6}$', nullable: true }
+      responses: { '200': { $ref: '#/components/responses/Ok' } }
+  /tenant/modules/{key}:
+    patch:
+      tags: [tenant]
+      summary: Enable/disable a module (plan quota enforced)
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties: { enabled: { type: boolean } }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+
+  # ==================== BILLING ====================
+  /billing/plans:
+    get:
+      tags: [billing]
+      summary: List subscription plans
+      responses: { '200': { description: Plans } }
+  /billing/subscription:
+    get:
+      tags: [billing]
+      summary: Current subscription, limits and usage
+      responses: { '200': { description: Subscription } }
+  /billing/subscribe:
+    post:
+      tags: [billing]
+      summary: Create an invoice for a paid plan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan]
+              properties:
+                plan: { type: string, enum: [starter, business] }
+                method: { type: string, enum: [bank_transfer, card], default: bank_transfer }
+      responses: { '201': { description: Invoice created } }
+  /billing/pay:
+    post:
+      tags: [billing]
+      summary: Pay an invoice by card (sandbox) and activate the plan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [invoiceId]
+              properties:
+                invoiceId: { type: string }
+                method: { type: string, enum: [card, mock, payme, click, stripe], default: card }
+      responses: { '200': { description: Activated } }
+
+  # ==================== ADMIN ====================
+  /admin/users:
+    get:
+      tags: [admin]
+      summary: List tenant users
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/search'
+      responses: { '200': { description: Users } }
+    post:
+      tags: [admin]
+      summary: Create a user with role codes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, fullName, password]
+              properties:
+                email: { type: string, format: email }
+                fullName: { type: string }
+                password: { type: string, minLength: 6 }
+                roleCodes:
+                  type: array
+                  items: { type: string }
+      responses: { '201': { description: Created } }
+  /admin/roles:
+    get:
+      tags: [admin]
+      summary: List roles with permissions
+      responses: { '200': { description: Roles } }
+    post:
+      tags: [admin]
+      summary: Create a custom role
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, name, permissions]
+              properties:
+                code: { type: string }
+                name: { type: string }
+                description: { type: string }
+                permissions:
+                  type: array
+                  items: { type: string }
+      responses: { '201': { description: Created } }
+  /admin/invitations:
+    get:
+      tags: [admin]
+      summary: List pending invitations
+      responses: { '200': { description: Invitations } }
+    post:
+      tags: [admin]
+      summary: Invite a user by email
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, roleCodes]
+              properties:
+                email: { type: string, format: email }
+                roleCodes:
+                  type: array
+                  items: { type: string }
+      responses: { '201': { description: Invitation created } }
+  /admin/audit:
+    get:
+      tags: [admin]
+      summary: Audit log (who / what / when)
+      parameters:
+        - $ref: '#/components/parameters/page'
+      responses: { '200': { description: Audit entries } }
+  /admin/permissions:
+    get:
+      tags: [admin]
+      summary: Global permission catalog
+      responses: { '200': { description: Permissions } }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 'Access token from POST /auth/login, sent as `Authorization: Bearer <token>`.'
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: 'Developer API key (ttr_live_…) created in the app under Управление → API-ключи. Recommended for server-to-server integrations. May also be sent as `Authorization: Bearer ttr_live_…`.'
+
+  parameters:
+    id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    pageSize:
+      name: pageSize
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    sort:
+      name: sort
+      in: query
+      schema: { type: string }
+    order:
+      name: order
+      in: query
+      schema: { type: string, enum: [asc, desc] }
+    search:
+      name: search
+      in: query
+      schema: { type: string }
+
+  responses:
+    Ok:
+      description: Success
+      content:
+        application/json:
+          schema:
+            type: object
+            properties: { ok: { type: boolean, example: true } }
+    ValidationError:
+      description: Validation or business-rule error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Missing or invalid credentials/token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: Unique constraint / duplicate
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string, example: VALIDATION_ERROR }
+            message: { type: string }
+            details: { type: object, nullable: true }
+    PageMeta:
+      type: object
+      properties:
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer }
+        totalPages: { type: integer }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string }
+        tenant: { type: string, description: 'Slug, when the email exists in multiple tenants' }
+        mfaCode: { type: string }
+    RegisterRequest:
+      type: object
+      required: [companyName, fullName, email, password]
+      properties:
+        companyName: { type: string }
+        industry: { type: string, description: 'Niche key, e.g. manufacturing, retail' }
+        fullName: { type: string }
+        email: { type: string, format: email }
+        password: { type: string, minLength: 8 }
+        plan: { type: string }
+        modules:
+          type: array
+          items: { type: string }
+        bill: { type: object, description: 'Optional legal/billing requisites' }
+    AuthResponse:
+      type: object
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        tenant:
+          type: object
+          properties:
+            id: { type: string }
+            slug: { type: string }
+            name: { type: string }
+        user: { $ref: '#/components/schemas/User' }
+    User:
+      type: object
+      properties:
+        id: { type: string }
+        email: { type: string }
+        fullName: { type: string }
+        tenantId: { type: string }
+        roles:
+          type: array
+          items: { type: string }
+        permissions:
+          type: array
+          items: { type: string }
+        platformAdmin: { type: boolean }
+    Product:
+      type: object
+      properties:
+        id: { type: string }
+        sku: { type: string }
+        name: { type: string }
+        type: { type: string, enum: [stockable, service] }
+        categoryId: { type: string, nullable: true }
+        unitId: { type: string, nullable: true }
+        priceMinor:
+          type: integer
+          nullable: true
+          description: 'Price in minor units (tiyin); null when the caller lacks catalog.price'
+        currency: { type: string }
+        barcode: { type: string, nullable: true }
+        tracking: { type: string, enum: [none, batch, serial], nullable: true }
+    ProductInput:
+      type: object
+      required: [sku, name]
+      properties:
+        sku: { type: string }
+        name: { type: string }
+        type: { type: string, enum: [stockable, service], default: stockable }
+        categoryId: { type: string }
+        unitId: { type: string }
+        priceMinor: { type: integer, default: 0, description: 'Minor units (tiyin)' }
+        currency: { type: string, default: UZS }
+        barcode: { type: string }
+        tracking: { type: string, enum: [none, batch, serial] }
+    StockRow:
+      type: object
+      properties:
+        warehouseId: { type: string }
+        warehouse: { type: string }
+        productId: { type: string }
+        sku: { type: string }
+        product: { type: string }
+        unit: { type: string }
+        quantity: { type: string }
+        reserved: { type: string }
+        available: { type: string }
+    OrderLineInput:
+      type: object
+      required: [productId, quantity, priceMinor]
+      properties:
+        productId: { type: string }
+        quantity: { type: number }
+        priceMinor: { type: integer, description: 'Unit price in minor units' }
+        discountPct: { type: integer, minimum: 0, maximum: 100, default: 0 }
+    PartyInput:
+      type: object
+      description: Customer or supplier
+      required: [code, name]
+      properties:
+        code: { type: string }
+        name: { type: string }
+        legalName: { type: string }
+        inn: { type: string }
+        phone: { type: string }
+        email: { type: string }
+        address: { type: string }
+        bank: { type: string }
+        account: { type: string }
+        mfo: { type: string }
+        rating: { type: integer, minimum: 0, maximum: 5 }
+        notes: { type: string }
+    FormField:
+      type: object
+      required: [key, label]
+      properties:
+        key: { type: string }
+        label: { type: string }
+        type: { type: string, enum: [text, textarea, number, date, select, checkbox], default: text }
+        required: { type: boolean, default: false }
+        options:
+          type: array
+          items: { type: string }
