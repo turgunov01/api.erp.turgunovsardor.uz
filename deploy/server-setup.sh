@@ -31,6 +31,9 @@ DOCS_DIR="$WWW/$DOCS_HOST"   # /var/www/docs.erp.turgunovsardor.uz
 PGDB=ttr_one
 PGUSER=ttr
 say(){ printf "\n\033[1;36m▶ %s\033[0m\n" "$*"; }
+# Prefer reproducible `npm ci`, but fall back to `npm install` if a lockfile generated on
+# another OS trips EBADPLATFORM on a platform-specific optional binary (sharp, etc.).
+npm_install(){ npm ci --no-audit --no-fund || { echo "  npm ci failed — falling back to npm install"; rm -rf node_modules; npm install --no-audit --no-fund; }; }
 
 # ---- 1. base packages ------------------------------------------------------
 say "Installing base packages"
@@ -100,7 +103,7 @@ EOF
   chmod 600 .env
   echo "  wrote $API_DIR/.env (secrets generated locally)"
 fi
-npm ci
+npm_install
 npx prisma generate
 npx prisma migrate deploy
 # First run only: seed demo data + admin so the app is testable.
@@ -136,13 +139,13 @@ systemctl restart ttr-api
 # ---- 6. Frontends: static builds ------------------------------------------
 say "Building ERP frontend (static SPA)"
 cd "$ERP_DIR"
-npm ci
+npm_install
 NUXT_PUBLIC_API_BASE="https://$API_HOST/api/v1" npx nuxi generate
 # nginx serves $ERP_DIR/.output/public directly (see erp site config).
 
 say "Building docs site (static)"
 cd "$DOCS_DIR"
-npm ci
+npm_install
 npx nuxi generate
 # nginx serves $DOCS_DIR/.output/public directly (see docs site config).
 
