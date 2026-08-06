@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  TTR ONE — one-shot production bootstrap for a fresh Ubuntu/Debian VPS.
+#
+#  Deploys three hosts behind nginx + Let's Encrypt TLS:
+#    erp.turgunovsardor.uz       → Nuxt SPA (static)      /var/www/erp
+#    api.erp.turgunovsardor.uz   → Node/Fastify API :3000 (systemd: ttr-api)
+#    docs.erp.turgunovsardor.uz  → Nuxt Content (static)  /var/www/docs
+#
+#  Idempotent-ish: safe to re-run. Secrets are generated ON THIS SERVER and
+#  never leave it. Run as root:   bash server-setup.sh
+#
+#  PREREQUISITES: DNS A-records for all three hosts already point here (they do).
+# =============================================================================
+set -euo pipefail
+
+# ---- config ----------------------------------------------------------------
+LE_EMAIL="sardorceeksamurai@gmail.com"          # Let's Encrypt expiry notices
+ERP_HOST="erp.turgunovsardor.uz"
+API_HOST="api.erp.turgunovsardor.uz"
+DOCS_HOST="docs.erp.turgunovsardor.uz"
+
+REPO_API="https://github.com/turgunov01/api.erp.turgunovsardor.uz.git"
+REPO_ERP="https://github.com/turgunov01/erp.turgunovsardor.uz.git"
+REPO_DOCS="https://github.com/turgunov01/docs.erp.turgunovsardor.uz.git"
+
+SRC=/opt/ttr
+PGDB=ttr_one
+PGUSER=ttr
+say(){ printf "\n\033[1;36m▶ %s\033[0m\n" "$*"; }
+
+# ---- 1. base packages ------------------------------------------------------
+say "Installing base packages"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y curl git ufw nginx postgresql postgresql-contrib \
+    certbot python3-certbot-nginx ca-certificates gnupg openssl
+
+# ---- 2. Node.js 20 ---------------------------------------------------------
+if ! command -v node >/dev/null || [ "$(node -v | cut -c2-3)" -lt 20 ]; then
+  say "Installing Node.js 20"
+  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+  apt-get install -y nodejs
+fi
+node -v
+
+# ---- 3. PostgreSQL role + database ----------------------------------------
+say "Provisioning PostgreSQL ($PGDB / $PGUSER)"
+systemctl enable --now postgresql
+if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$PGUSER'" | grep -q 1; then
+  PGPASS="$(openssl rand -hex 24)"
+  sudo -u postgres psql -c "CREATE ROLE $PGUSER LOGIN PASSWORD '$PGPASS';"
+  sudo -u postgres psql -c "CREATE DATABASE $PGDB OWNER $PGUSER;"
+  echo "$PGPASS" > /root/.ttr_pgpass && chmod 600 /root/.ttr_pgpass
+  echo "  (db password saved to /root/.ttr_pgpass)"
+else
+  PGPASS="$(cat /root/.ttr_pgpass)"
+  echo "  role exists — reusing saved password"
+fi
+DATABASE_URL="postgresql://$PGUSER:$PGPASS@127.0.0.1:5432/$PGDB?schema=public"
+
+# ---- 4. clone / update repos ----------------------------------------------
+say "Fetching source"
+mkdir -p "$SRC"
+clone_or_pull(){ [ -d "$2/.git" ] && git -C "$2" pull --ff-only || git clone --depth 1 "$1" "$2"; }
+clone_or_pull "$REPO_API"  "$SRC/api"
+clone_or_pull "$REPO_ERP"  "$SRC/erp"
+clone_or_pull "$REPO_DOCS" "$SRC/docs"
+
+# ---- 5. API: env, deps, migrate, seed, systemd ----------------------------
+say "Building API"
+cd "$SRC/api"
+if [ ! -f .env ]; then
+  cat > .env <<EOF
+NODE_ENV=production
+HOST=127.0.0.1
+PORT=3000
+DATABASE_URL=$DATABASE_URL
+JWT_SECRET=$(openssl rand -hex 32)
+SECRET_KEY=$(openssl rand -hex 32)
+CORS_ORIGINS=https://$ERP_HOST
+APP_URL=https://$ERP_HOST
+# Optional integrations — fill in later if needed:
+ANTHROPIC_API_KEY=
+OPENAI_API_KEY=
+AI_MODEL=
+SMTP_URL=
+TELEGRAM_BOT_TOKEN=
+EOF
+  chmod 600 .env
+  echo "  wrote $SRC/api/.env (secrets generated locally)"
+fi
+npm ci
+npx prisma generate
+npx prisma migrate deploy
+# First run only: seed demo data + admin so the app is testable.
+# For a real client start empty instead:  npx tsx scripts/reset-for-client.ts
+if [ ! -f .seeded ]; then npm run db:seed && touch .seeded; fi
+
+cat > /etc/systemd/system/ttr-api.service <<EOF
+[Unit]
+Description=TTR ONE API
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+WorkingDirectory=$SRC/api
+EnvironmentFile=$SRC/api/.env
+ExecStart=/usr/bin/npx tsx src/server.ts
+Restart=always
+RestartSec=3
+# hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now ttr-api
+systemctl restart ttr-api
+
+# ---- 6. Frontends: static builds ------------------------------------------
+say "Building ERP frontend (static SPA)"
+cd "$SRC/erp"
+npm ci
+NUXT_PUBLIC_API_BASE="https://$API_HOST/api/v1" npx nuxi generate
+mkdir -p /var/www/erp && rm -rf /var/www/erp/* && cp -r .output/public/* /var/www/erp/
+
+say "Building docs site (static)"
+cd "$SRC/docs"
+npm ci
+npx nuxi generate
+mkdir -p /var/www/docs && rm -rf /var/www/docs/* && cp -r .output/public/* /var/www/docs/
+
+chown -R www-data:www-data /var/www/erp /var/www/docs
+
+# ---- 7. nginx: shared snippets + rate-limit + upgrade map -----------------
+say "Installing nginx config"
+mkdir -p /etc/nginx/snippets /var/www/certbot
+cp "$SRC/api/deploy/nginx/snippets/"*.conf /etc/nginx/snippets/
+cp "$SRC/api/deploy/nginx/conf.d/"*.conf   /etc/nginx/conf.d/
+
+# Phase A — HTTP-only bootstrap so certbot can solve the ACME challenge.
+cat > /etc/nginx/sites-available/ttr-bootstrap.conf <<EOF
+server {
+    listen 80;
+    server_name $ERP_HOST $API_HOST $DOCS_HOST;
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 200 'ttr bootstrap'; }
+}
+EOF
+ln -sf /etc/nginx/sites-available/ttr-bootstrap.conf /etc/nginx/sites-enabled/ttr-bootstrap.conf
+rm -f /etc/nginx/sites-enabled/default
+nginx -t && systemctl reload nginx
+
+# ---- 8. certificates -------------------------------------------------------
+say "Obtaining Let's Encrypt certificates"
+certbot certonly --webroot -w /var/www/certbot --non-interactive --agree-tos \
+    -m "$LE_EMAIL" -d "$ERP_HOST" -d "$API_HOST" -d "$DOCS_HOST" || {
+      # fall back to per-host if a combined issuance fails
+      for H in "$ERP_HOST" "$API_HOST" "$DOCS_HOST"; do
+        certbot certonly --webroot -w /var/www/certbot --non-interactive --agree-tos -m "$LE_EMAIL" -d "$H" || true
+      done; }
+
+# Phase B — swap in the real TLS site configs.
+say "Enabling TLS sites"
+rm -f /etc/nginx/sites-enabled/ttr-bootstrap.conf
+for H in "$ERP_HOST" "$API_HOST" "$DOCS_HOST"; do
+  cp "$SRC/api/deploy/nginx/$H.conf" "/etc/nginx/sites-available/$H.conf"
+  ln -sf "/etc/nginx/sites-available/$H.conf" "/etc/nginx/sites-enabled/$H.conf"
+done
+nginx -t && systemctl reload nginx
+systemctl enable certbot.timer 2>/dev/null || true   # auto-renew
+
+# ---- 9. firewall -----------------------------------------------------------
+say "Configuring firewall (ufw)"
+ufw allow OpenSSH
+ufw allow 'Nginx Full'
+ufw --force enable
+# 3000 (API) and 5432 (Postgres) are NOT opened — internal only.
+
+# ---- 10. smoke test --------------------------------------------------------
+say "Smoke test"
+sleep 3
+curl -sko /dev/null -w "API  /health   → %{http_code}\n" "https://$API_HOST/health"  || true
+curl -sko /dev/null -w "ERP  /          → %{http_code}\n" "https://$ERP_HOST/"                || true
+curl -sko /dev/null -w "DOCS /          → %{http_code}\n" "https://$DOCS_HOST/"               || true
+
+say "Done. Admin login (demo seed): admin@demo-factory.com / Admin123!  ← CHANGE IT."
+echo "Next: rotate the root password, create a non-root sudo user, disable SSH root+password login."
