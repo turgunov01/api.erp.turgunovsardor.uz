@@ -94,6 +94,8 @@ JWT_SECRET=$(openssl rand -hex 32)
 SECRET_KEY=$(openssl rand -hex 32)
 CORS_ORIGINS=https://$ERP_HOST
 APP_URL=https://$ERP_HOST
+SEED_ADMIN_EMAIL=admin@demo-factory.com
+SEED_ADMIN_PASSWORD=$(openssl rand -hex 12)
 # Optional integrations — fill in later if needed:
 ANTHROPIC_API_KEY=
 OPENAI_API_KEY=
@@ -104,9 +106,12 @@ EOF
   chmod 600 .env
   echo "  wrote $API_DIR/.env (secrets generated locally)"
 fi
-# Self-heal: :3000 is taken by another app on this host, so pin our API to :9990
-# (matches proxy_pass in the api nginx config). Applies to pre-existing .env too.
+# Self-heal (applies to pre-existing .env too):
+#  • :3000 is taken by another app on this host → pin our API to :9990.
+#  • production boot gate refuses the demo default SEED_ADMIN_PASSWORD → ensure a real one.
 sed -i 's/^PORT=.*/PORT=9990/' .env
+grep -q '^SEED_ADMIN_PASSWORD=' .env || echo "SEED_ADMIN_PASSWORD=$(openssl rand -hex 12)" >> .env
+sed -i "s/^SEED_ADMIN_PASSWORD=Admin123!\$/SEED_ADMIN_PASSWORD=$(openssl rand -hex 12)/" .env
 npm_install
 npx prisma generate
 npx prisma migrate deploy
