@@ -4,7 +4,7 @@
 #
 #  Deploys three hosts behind nginx + Let's Encrypt TLS:
 #    erp.turgunovsardor.uz       → Nuxt SPA (static)      /var/www/erp
-#    api.erp.turgunovsardor.uz   → Node/Fastify API :3000 (systemd: ttr-api)
+#    api.erp.turgunovsardor.uz   → Node/Fastify API :9990 (systemd: ttr-api)
 #    docs.erp.turgunovsardor.uz  → Nuxt Content (static)  /var/www/docs
 #
 #  Idempotent-ish: safe to re-run. Secrets are generated ON THIS SERVER and
@@ -88,7 +88,7 @@ if [ ! -f .env ]; then
   cat > .env <<EOF
 NODE_ENV=production
 HOST=127.0.0.1
-PORT=3100
+PORT=9990
 DATABASE_URL=$DATABASE_URL
 JWT_SECRET=$(openssl rand -hex 32)
 SECRET_KEY=$(openssl rand -hex 32)
@@ -104,9 +104,9 @@ EOF
   chmod 600 .env
   echo "  wrote $API_DIR/.env (secrets generated locally)"
 fi
-# Self-heal: this host already runs another app on :3000, so pin our API to :3100
+# Self-heal: :3000 is taken by another app on this host, so pin our API to :9990
 # (matches proxy_pass in the api nginx config). Applies to pre-existing .env too.
-sed -i 's/^PORT=.*/PORT=3100/' .env
+sed -i 's/^PORT=.*/PORT=9990/' .env
 npm_install
 npx prisma generate
 npx prisma migrate deploy
