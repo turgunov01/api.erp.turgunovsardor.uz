@@ -88,7 +88,7 @@ if [ ! -f .env ]; then
   cat > .env <<EOF
 NODE_ENV=production
 HOST=127.0.0.1
-PORT=3000
+PORT=3100
 DATABASE_URL=$DATABASE_URL
 JWT_SECRET=$(openssl rand -hex 32)
 SECRET_KEY=$(openssl rand -hex 32)
@@ -104,6 +104,9 @@ EOF
   chmod 600 .env
   echo "  wrote $API_DIR/.env (secrets generated locally)"
 fi
+# Self-heal: this host already runs another app on :3000, so pin our API to :3100
+# (matches proxy_pass in the api nginx config). Applies to pre-existing .env too.
+sed -i 's/^PORT=.*/PORT=3100/' .env
 npm_install
 npx prisma generate
 npx prisma migrate deploy
