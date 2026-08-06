@@ -2,11 +2,14 @@
 
 Three hosts on one VPS, all DNS A-records already pointing at the server:
 
-| Host | Project | Served as | Upstream |
-|------|---------|-----------|----------|
-| `erp.turgunovsardor.uz`  | ERP frontend (Nuxt SPA) | static files | `/var/www/erp` |
-| `api.erp.turgunovsardor.uz`  | Backend API (Fastify) | reverse proxy | `127.0.0.1:3000` (systemd `ttr-api`) |
-| `docs.erp.turgunovsardor.uz` | Developer docs (Nuxt Content) | static files | `/var/www/docs` |
+| Host | Project | Folder | Served as |
+|------|---------|--------|-----------|
+| `erp.turgunovsardor.uz`  | ERP frontend (Nuxt SPA) | `/var/www/erp.turgunovsardor.uz` | static from `.output/public` |
+| `api.erp.turgunovsardor.uz`  | Backend API (Fastify) | `/var/www/api.erp.turgunovsardor.uz` | reverse proxy → `127.0.0.1:3000` (systemd `ttr-api`) |
+| `docs.erp.turgunovsardor.uz` | Developer docs (Nuxt Content) | `/var/www/docs.erp.turgunovsardor.uz` | static from `.output/public` |
+
+Every project lives under `/var/www/<domain>`. The two frontends are served straight from
+their `.output/public` build dir; the API runs as a service out of its folder.
 
 Postgres 16 and the API port (3000) are **internal only** — never exposed publicly.
 
@@ -22,7 +25,7 @@ sudo bash /tmp/ttr-api/deploy/server-setup.sh
 
 The script installs Node 20, nginx, Postgres, certbot; generates all secrets locally
 (`JWT_SECRET`, `SECRET_KEY`, DB password via `openssl rand`); clones the three repos to
-`/opt/ttr/{api,erp,docs}`; runs migrations + demo seed; registers the `ttr-api` systemd
+`/var/www/{erp,api.erp,docs.erp}.turgunovsardor.uz`; runs migrations + demo seed; registers the `ttr-api` systemd
 service; builds both static frontends; installs the nginx configs; obtains TLS certs; and
 turns on the `ufw` firewall.
 
@@ -40,11 +43,11 @@ turns on the `ufw` firewall.
 
 ```bash
 # API
-cd /opt/ttr/api && git pull && npm ci && npx prisma migrate deploy && sudo systemctl restart ttr-api
-# ERP
-cd /opt/ttr/erp && git pull && npm ci && NUXT_PUBLIC_API_BASE="https://api.erp.turgunovsardor.uz/api/v1" npx nuxi generate && sudo cp -r .output/public/* /var/www/erp/
+cd /var/www/api.erp.turgunovsardor.uz && git pull && npm ci && npx prisma migrate deploy && sudo systemctl restart ttr-api
+# ERP  (nginx serves .output/public in place — no copy step)
+cd /var/www/erp.turgunovsardor.uz && git pull && npm ci && NUXT_PUBLIC_API_BASE="https://api.erp.turgunovsardor.uz/api/v1" npx nuxi generate
 # docs
-cd /opt/ttr/docs && git pull && npm ci && npx nuxi generate && sudo cp -r .output/public/* /var/www/docs/
+cd /var/www/docs.erp.turgunovsardor.uz && git pull && npm ci && npx nuxi generate
 ```
 
 ## Post-install hardening (do this first!)
@@ -66,5 +69,5 @@ systemctl restart ssh
 ## For a real client (empty system instead of demo data)
 
 ```bash
-cd /opt/ttr/api && npx tsx scripts/reset-for-client.ts   # 1 clean tenant, no demo junk
+cd /var/www/api.erp.turgunovsardor.uz && npx tsx scripts/reset-for-client.ts   # 1 clean tenant, no demo junk
 ```

@@ -24,7 +24,10 @@ REPO_API="https://github.com/turgunov01/api.erp.turgunovsardor.uz.git"
 REPO_ERP="https://github.com/turgunov01/erp.turgunovsardor.uz.git"
 REPO_DOCS="https://github.com/turgunov01/docs.erp.turgunovsardor.uz.git"
 
-SRC=/opt/ttr
+WWW=/var/www
+API_DIR="$WWW/$API_HOST"     # /var/www/api.erp.turgunovsardor.uz
+ERP_DIR="$WWW/$ERP_HOST"     # /var/www/erp.turgunovsardor.uz
+DOCS_DIR="$WWW/$DOCS_HOST"   # /var/www/docs.erp.turgunovsardor.uz
 PGDB=ttr_one
 PGUSER=ttr
 say(){ printf "\n\033[1;36m▶ %s\033[0m\n" "$*"; }
@@ -61,15 +64,15 @@ DATABASE_URL="postgresql://$PGUSER:$PGPASS@127.0.0.1:5432/$PGDB?schema=public"
 
 # ---- 4. clone / update repos ----------------------------------------------
 say "Fetching source"
-mkdir -p "$SRC"
+mkdir -p "$WWW"
 clone_or_pull(){ [ -d "$2/.git" ] && git -C "$2" pull --ff-only || git clone --depth 1 "$1" "$2"; }
-clone_or_pull "$REPO_API"  "$SRC/api"
-clone_or_pull "$REPO_ERP"  "$SRC/erp"
-clone_or_pull "$REPO_DOCS" "$SRC/docs"
+clone_or_pull "$REPO_API"  "$API_DIR"
+clone_or_pull "$REPO_ERP"  "$ERP_DIR"
+clone_or_pull "$REPO_DOCS" "$DOCS_DIR"
 
 # ---- 5. API: env, deps, migrate, seed, systemd ----------------------------
 say "Building API"
-cd "$SRC/api"
+cd "$API_DIR"
 if [ ! -f .env ]; then
   cat > .env <<EOF
 NODE_ENV=production
@@ -88,7 +91,7 @@ SMTP_URL=
 TELEGRAM_BOT_TOKEN=
 EOF
   chmod 600 .env
-  echo "  wrote $SRC/api/.env (secrets generated locally)"
+  echo "  wrote $API_DIR/.env (secrets generated locally)"
 fi
 npm ci
 npx prisma generate
@@ -105,8 +108,8 @@ Wants=postgresql.service
 
 [Service]
 Type=simple
-WorkingDirectory=$SRC/api
-EnvironmentFile=$SRC/api/.env
+WorkingDirectory=$API_DIR
+EnvironmentFile=$API_DIR/.env
 ExecStart=/usr/bin/npx tsx src/server.ts
 Restart=always
 RestartSec=3
@@ -125,24 +128,26 @@ systemctl restart ttr-api
 
 # ---- 6. Frontends: static builds ------------------------------------------
 say "Building ERP frontend (static SPA)"
-cd "$SRC/erp"
+cd "$ERP_DIR"
 npm ci
 NUXT_PUBLIC_API_BASE="https://$API_HOST/api/v1" npx nuxi generate
-mkdir -p /var/www/erp && rm -rf /var/www/erp/* && cp -r .output/public/* /var/www/erp/
+# nginx serves $ERP_DIR/.output/public directly (see erp site config).
 
 say "Building docs site (static)"
-cd "$SRC/docs"
+cd "$DOCS_DIR"
 npm ci
 npx nuxi generate
-mkdir -p /var/www/docs && rm -rf /var/www/docs/* && cp -r .output/public/* /var/www/docs/
+# nginx serves $DOCS_DIR/.output/public directly (see docs site config).
 
-chown -R www-data:www-data /var/www/erp /var/www/docs
+# nginx (www-data) must be able to traverse the dirs and read the built output.
+chmod 755 "$ERP_DIR" "$DOCS_DIR"
+chown -R www-data:www-data "$ERP_DIR/.output" "$DOCS_DIR/.output"
 
 # ---- 7. nginx: shared snippets + rate-limit + upgrade map -----------------
 say "Installing nginx config"
 mkdir -p /etc/nginx/snippets /var/www/certbot
-cp "$SRC/api/deploy/nginx/snippets/"*.conf /etc/nginx/snippets/
-cp "$SRC/api/deploy/nginx/conf.d/"*.conf   /etc/nginx/conf.d/
+cp "$API_DIR/deploy/nginx/snippets/"*.conf /etc/nginx/snippets/
+cp "$API_DIR/deploy/nginx/conf.d/"*.conf   /etc/nginx/conf.d/
 
 # Phase A — HTTP-only bootstrap so certbot can solve the ACME challenge.
 cat > /etc/nginx/sites-available/ttr-bootstrap.conf <<EOF
@@ -170,7 +175,7 @@ certbot certonly --webroot -w /var/www/certbot --non-interactive --agree-tos \
 say "Enabling TLS sites"
 rm -f /etc/nginx/sites-enabled/ttr-bootstrap.conf
 for H in "$ERP_HOST" "$API_HOST" "$DOCS_HOST"; do
-  cp "$SRC/api/deploy/nginx/$H.conf" "/etc/nginx/sites-available/$H.conf"
+  cp "$API_DIR/deploy/nginx/$H.conf" "/etc/nginx/sites-available/$H.conf"
   ln -sf "/etc/nginx/sites-available/$H.conf" "/etc/nginx/sites-enabled/$H.conf"
 done
 nginx -t && systemctl reload nginx
