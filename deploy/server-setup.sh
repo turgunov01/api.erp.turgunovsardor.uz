@@ -40,12 +40,13 @@ say "Installing base packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y curl git ufw nginx postgresql postgresql-contrib \
-    certbot python3-certbot-nginx ca-certificates gnupg openssl
+    certbot python3-certbot-nginx ca-certificates gnupg openssl \
+    build-essential python3 pkg-config   # build-essential: native modules (better-sqlite3)
 
-# ---- 2. Node.js 20 ---------------------------------------------------------
-if ! command -v node >/dev/null || [ "$(node -v | cut -c2-3)" -lt 20 ]; then
-  say "Installing Node.js 20"
-  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+# ---- 2. Node.js 22 (Nuxt 4 / undici / oxc require >=22) --------------------
+if ! command -v node >/dev/null || [ "$(node -v | cut -c2-3)" -lt 22 ]; then
+  say "Installing Node.js 22"
+  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
   apt-get install -y nodejs
 fi
 node -v
