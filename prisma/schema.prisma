@@ -32,6 +32,8 @@ model Tenant {
   subscriptionStatus String    @default("trialing") // trialing | active | past_due | cancelled
   trialEndsAt        DateTime?
   currentPeriodEnd   DateTime?
+  billingCycle       String    @default("monthly") // monthly | annual
+  extraSeats         Int       @default(0) // paid user seats above the plan's included users
   // White-label branding
   brandName  String?
   brandColor String? // hex, e.g. #2563eb
@@ -498,8 +500,10 @@ model Invoice {
   number      String    @unique // human-readable invoice number
   plan        String
   method      String    @default("bank_transfer") // bank_transfer | card
-  amountMinor Int // integer minor units (no float for money) — total incl. VAT
-  vatMinor    Int       @default(0) // VAT (QQS) portion of the total
+  cycle       String    @default("monthly") // monthly | annual (billing period of this invoice)
+  seats       Int       @default(0) // extra paid user seats included in this invoice
+  amountMinor BigInt // integer minor units (no float for money) — total incl. VAT (BigInt: UZS annual totals exceed INT4)
+  vatMinor    BigInt    @default(0) // VAT (QQS) portion of the total
   currency    String    @default("UZS")
   status      String    @default("open") // open | paid | void
   periodStart DateTime
@@ -536,7 +540,7 @@ model Payment {
   id          String   @id @default(cuid())
   tenantId    String
   invoiceId   String?
-  amountMinor Int
+  amountMinor BigInt
   currency    String   @default("UZS")
   method      String // mock | payme | click | stripe
   status      String // succeeded | failed

@@ -13,7 +13,8 @@ export async function assertWithinLimit(tenantId: string, resource: Resource): P
   const plan = getPlan(tenant.plan);
 
   const limit =
-    resource === 'users' ? plan.maxUsers :
+    // Paid extra seats raise the user cap above the plan's included users.
+    resource === 'users' ? (plan.maxUsers === null ? null : plan.maxUsers + (tenant.extraSeats ?? 0)) :
     resource === 'warehouses' ? plan.maxWarehouses :
     plan.maxProducts;
 

@@ -2,8 +2,8 @@
 import type { Invoice, Tenant } from '@prisma/client';
 import type { SellerRequisites } from './requisites.js';
 
-const money = (minor: number, cur = 'UZS') =>
-  (minor / 100).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + cur;
+const money = (minor: number | bigint, cur = 'UZS') =>
+  (Number(minor) / 100).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + cur;
 
 const esc = (s: unknown) =>
   String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));

@@ -1,0 +1,6 @@
+-- AlterTable
+ALTER TABLE "Invoice" ALTER COLUMN "amountMinor" SET DATA TYPE BIGINT,
+ALTER COLUMN "vatMinor" SET DATA TYPE BIGINT;
+
+-- AlterTable
+ALTER TABLE "Payment" ALTER COLUMN "amountMinor" SET DATA TYPE BIGINT;

@@ -109,7 +109,7 @@ export default async function superadminRoutes(app: FastifyInstance) {
     const invoice = await prisma.invoice.findUnique({ where: { id }, include: { tenant: true } });
     if (!invoice) throw NotFound('Invoice not found');
     const res = await createEsf({
-      invoiceNumber: invoice.number, amountMinor: invoice.amountMinor, vatMinor: invoice.vatMinor,
+      invoiceNumber: invoice.number, amountMinor: Number(invoice.amountMinor), vatMinor: Number(invoice.vatMinor),
       buyerInn: invoice.tenant.billInn ?? '', buyerName: invoice.tenant.billLegalName ?? invoice.tenant.name,
     });
     await prisma.invoice.update({ where: { id }, data: { didoxId: res.didoxId, didoxStatus: res.status } });

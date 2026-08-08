@@ -8,15 +8,20 @@ export interface PlanDef {
   maxWarehouses: number | null;
   maxProducts: number | null;
   maxModules: number | null; // how many business modules can be enabled; null = unlimited
+  perUserMinor?: number; // price per additional user/seat above the plan's included users (per month)
   highlight?: boolean;
   tagline?: string; // short marketing line shown in the onboarding wizard
 }
 
+// Annual billing charges 10 months for 12 (2 months free).
+export const ANNUAL_MONTHS = 10;
+export const PERIOD_DAYS_ANNUAL = 365;
+
 export const PLANS: PlanDef[] = [
   { key: 'trial', name: 'Бесплатный', priceMinor: 0, currency: 'UZS', maxUsers: 3, maxWarehouses: 2, maxProducts: 150, maxModules: null, tagline: 'Все модули · 14 дней бесплатно' },
-  { key: 'starter', name: 'Старт', priceMinor: 69_000_000, currency: 'UZS', maxUsers: 5, maxWarehouses: 3, maxProducts: 2_000, maxModules: 3, tagline: 'Для розницы и старта — до 3 модулей' },
-  { key: 'business', name: 'Бизнес', priceMinor: 199_000_000, currency: 'UZS', maxUsers: 25, maxWarehouses: 15, maxProducts: 50_000, maxModules: 8, highlight: true, tagline: 'Для растущей компании — до 8 модулей' },
-  { key: 'production', name: 'Производство', priceMinor: 449_000_000, currency: 'UZS', maxUsers: 75, maxWarehouses: 50, maxProducts: 200_000, maxModules: null, tagline: 'Производство, MRP, партии и ОТК — все модули' },
+  { key: 'starter', name: 'Старт', priceMinor: 69_000_000, currency: 'UZS', maxUsers: 5, maxWarehouses: 3, maxProducts: 2_000, maxModules: 3, perUserMinor: 9_000_000, tagline: 'Для розницы и старта — до 3 модулей' },
+  { key: 'business', name: 'Бизнес', priceMinor: 199_000_000, currency: 'UZS', maxUsers: 25, maxWarehouses: 15, maxProducts: 50_000, maxModules: 8, perUserMinor: 12_000_000, highlight: true, tagline: 'Для растущей компании — до 8 модулей' },
+  { key: 'production', name: 'Производство', priceMinor: 449_000_000, currency: 'UZS', maxUsers: 75, maxWarehouses: 50, maxProducts: 200_000, maxModules: null, perUserMinor: 15_000_000, tagline: 'Производство, MRP, партии и ОТК — все модули' },
   { key: 'enterprise', name: 'Enterprise', priceMinor: null, currency: 'UZS', maxUsers: null, maxWarehouses: null, maxProducts: null, maxModules: null, tagline: 'Холдинги: white-label, интеграции, SLA' },
 ];
 

@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../../db.js';
 import { requirePermission } from '../../plugins/rbac.js';
-import { PLANS, getPlan, PAID_PLAN_KEYS, PERIOD_DAYS } from '../../lib/plans.js';
+import { PLANS, getPlan, PAID_PLAN_KEYS, PERIOD_DAYS, ANNUAL_MONTHS, PERIOD_DAYS_ANNUAL } from '../../lib/plans.js';
 import { effectiveStatus, daysLeft } from '../../lib/subscription.js';
 import { charge, type CardProvider } from '../../lib/payments.js';
 import { getSellerRequisites, vatBreakdown } from '../../lib/requisites.js';
@@ -67,26 +67,35 @@ export default async function billingRoutes(app: FastifyInstance) {
     return {
       plan: plan.key, planName: plan.name, status: effectiveStatus(t),
       trialEndsAt: t.trialEndsAt, trialDaysLeft: daysLeft(t.trialEndsAt), currentPeriodEnd: t.currentPeriodEnd,
-      limits: { maxUsers: plan.maxUsers, maxWarehouses: plan.maxWarehouses, maxProducts: plan.maxProducts },
+      billingCycle: t.billingCycle, extraSeats: t.extraSeats, perUserMinor: plan.perUserMinor ?? 0,
+      limits: { maxUsers: plan.maxUsers === null ? null : plan.maxUsers + (t.extraSeats ?? 0), maxWarehouses: plan.maxWarehouses, maxProducts: plan.maxProducts },
       usage: { users, warehouses, products },
     };
   });
 
   // Create an open invoice for a paid plan. method: bank_transfer (official) | card (online).
-  const subscribeSchema = z.object({ plan: z.enum(['starter', 'business', 'production']), method: z.enum(['bank_transfer', 'card']).default('bank_transfer') });
+  const subscribeSchema = z.object({
+    plan: z.enum(['starter', 'business', 'production']),
+    method: z.enum(['bank_transfer', 'card']).default('bank_transfer'),
+    cycle: z.enum(['monthly', 'annual']).default('monthly'),
+    seats: z.number().int().min(0).max(500).default(0), // extra paid users above the plan's included
+  });
   app.post('/subscribe', { preHandler: [requirePermission('tenant.manage')] }, async (req, reply) => {
-    const { plan: planKey, method } = subscribeSchema.parse(req.body);
+    const { plan: planKey, method, cycle, seats } = subscribeSchema.parse(req.body);
     if (!PAID_PLAN_KEYS.includes(planKey)) throw BadRequest('Этот тариф нельзя оформить онлайн');
     const plan = getPlan(planKey);
     const seller = await getSellerRequisites();
-    const total = plan.priceMinor ?? 0;
+    const months = cycle === 'annual' ? ANNUAL_MONTHS : 1; // annual = 10 months (2 free)
+    const monthlyBase = (plan.priceMinor ?? 0) + seats * (plan.perUserMinor ?? 0);
+    const total = monthlyBase * months;
     const { vatMinor } = vatBreakdown(total, seller.vatPercent);
     const now = new Date();
-    const periodEnd = new Date(now.getTime() + PERIOD_DAYS * 24 * 60 * 60 * 1000);
+    const days = cycle === 'annual' ? PERIOD_DAYS_ANNUAL : PERIOD_DAYS;
+    const periodEnd = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
     const invoice = await prisma.invoice.create({
-      data: { tenantId: req.auth.tid, number: await nextInvoiceNumber(), plan: planKey, method, amountMinor: total, vatMinor, currency: plan.currency, status: 'open', periodStart: now, periodEnd },
+      data: { tenantId: req.auth.tid, number: await nextInvoiceNumber(), plan: planKey, method, cycle, seats, amountMinor: BigInt(total), vatMinor: BigInt(vatMinor), currency: plan.currency, status: 'open', periodStart: now, periodEnd },
     });
-    await audit({ tenantId: req.auth.tid, userId: req.auth.sub, action: 'billing.invoice.create', entity: 'Invoice', entityId: invoice.id, meta: { plan: planKey, method, amountMinor: total } });
+    await audit({ tenantId: req.auth.tid, userId: req.auth.sub, action: 'billing.invoice.create', entity: 'Invoice', entityId: invoice.id, meta: { plan: planKey, method, cycle, seats, amountMinor: total } });
     return reply.code(201).send({ invoice });
   });
 
@@ -111,11 +120,11 @@ export default async function billingRoutes(app: FastifyInstance) {
     if (!invoice) throw NotFound('Invoice not found');
     if (invoice.status === 'paid') throw BadRequest('Счёт уже оплачён');
 
-    const result = await charge({ amountMinor: invoice.amountMinor, currency: invoice.currency, method: method as CardProvider, description: `TTR ONE ${invoice.plan}` });
+    const result = await charge({ amountMinor: Number(invoice.amountMinor), currency: invoice.currency, method: method as CardProvider, description: `TTR ONE ${invoice.plan}` });
     await prisma.$transaction([
       prisma.payment.create({ data: { tenantId: req.auth.tid, invoiceId: invoice.id, amountMinor: invoice.amountMinor, currency: invoice.currency, method, status: result.status, providerRef: result.providerRef } }),
       prisma.invoice.update({ where: { id: invoice.id }, data: { status: 'paid', paidAt: new Date() } }),
-      prisma.tenant.update({ where: { id: req.auth.tid }, data: { plan: invoice.plan, subscriptionStatus: 'active', currentPeriodEnd: invoice.periodEnd } }),
+      prisma.tenant.update({ where: { id: req.auth.tid }, data: { plan: invoice.plan, subscriptionStatus: 'active', currentPeriodEnd: invoice.periodEnd, extraSeats: invoice.seats, billingCycle: invoice.cycle } }),
     ]);
     await audit({ tenantId: req.auth.tid, userId: req.auth.sub, action: 'billing.payment', entity: 'Payment', entityId: invoice.id, meta: { method, plan: invoice.plan } });
     return reply.send({ ok: true, plan: invoice.plan, status: 'active', currentPeriodEnd: invoice.periodEnd });
