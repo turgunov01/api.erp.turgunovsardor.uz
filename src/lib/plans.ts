@@ -13,16 +13,17 @@ export interface PlanDef {
 }
 
 export const PLANS: PlanDef[] = [
-  { key: 'trial', name: 'Бесплатный', priceMinor: 0, currency: 'UZS', maxUsers: 5, maxWarehouses: 3, maxProducts: 200, maxModules: null, highlight: true, tagline: 'Все модули · 14 дней бесплатно' },
-  { key: 'starter', name: 'Starter', priceMinor: 29_900_000, currency: 'UZS', maxUsers: 10, maxWarehouses: 5, maxProducts: 2_000, maxModules: 3, tagline: 'Для старта — до 3 модулей' },
-  { key: 'business', name: 'Business', priceMinor: 99_900_000, currency: 'UZS', maxUsers: 100, maxWarehouses: 50, maxProducts: 100_000, maxModules: 6, tagline: 'Для растущей компании — до 6 модулей' },
-  { key: 'enterprise', name: 'Enterprise', priceMinor: null, currency: 'UZS', maxUsers: null, maxWarehouses: null, maxProducts: null, maxModules: null, tagline: 'Все модули без ограничений' },
+  { key: 'trial', name: 'Бесплатный', priceMinor: 0, currency: 'UZS', maxUsers: 3, maxWarehouses: 2, maxProducts: 150, maxModules: null, tagline: 'Все модули · 14 дней бесплатно' },
+  { key: 'starter', name: 'Старт', priceMinor: 69_000_000, currency: 'UZS', maxUsers: 5, maxWarehouses: 3, maxProducts: 2_000, maxModules: 3, tagline: 'Для розницы и старта — до 3 модулей' },
+  { key: 'business', name: 'Бизнес', priceMinor: 199_000_000, currency: 'UZS', maxUsers: 25, maxWarehouses: 15, maxProducts: 50_000, maxModules: 8, highlight: true, tagline: 'Для растущей компании — до 8 модулей' },
+  { key: 'production', name: 'Производство', priceMinor: 449_000_000, currency: 'UZS', maxUsers: 75, maxWarehouses: 50, maxProducts: 200_000, maxModules: null, tagline: 'Производство, MRP, партии и ОТК — все модули' },
+  { key: 'enterprise', name: 'Enterprise', priceMinor: null, currency: 'UZS', maxUsers: null, maxWarehouses: null, maxProducts: null, maxModules: null, tagline: 'Холдинги: white-label, интеграции, SLA' },
 ];
 
-export const PAID_PLAN_KEYS = ['starter', 'business'];
+export const PAID_PLAN_KEYS = ['starter', 'business', 'production'];
 // Plans a company can pick during self-registration. 'trial' is the free 14-day tier
 // (all modules); the paid tiers cap how many business modules can stay enabled.
-export const SELECTABLE_PLAN_KEYS = ['trial', 'starter', 'business', 'enterprise'];
+export const SELECTABLE_PLAN_KEYS = ['trial', 'starter', 'business', 'production', 'enterprise'];
 
 export function getPlan(key: string | null | undefined): PlanDef {
   return PLANS.find((p) => p.key === key) ?? PLANS[0];

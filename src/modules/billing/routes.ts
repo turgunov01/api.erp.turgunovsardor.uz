@@ -73,7 +73,7 @@ export default async function billingRoutes(app: FastifyInstance) {
   });
 
   // Create an open invoice for a paid plan. method: bank_transfer (official) | card (online).
-  const subscribeSchema = z.object({ plan: z.enum(['starter', 'business']), method: z.enum(['bank_transfer', 'card']).default('bank_transfer') });
+  const subscribeSchema = z.object({ plan: z.enum(['starter', 'business', 'production']), method: z.enum(['bank_transfer', 'card']).default('bank_transfer') });
   app.post('/subscribe', { preHandler: [requirePermission('tenant.manage')] }, async (req, reply) => {
     const { plan: planKey, method } = subscribeSchema.parse(req.body);
     if (!PAID_PLAN_KEYS.includes(planKey)) throw BadRequest('Этот тариф нельзя оформить онлайн');
